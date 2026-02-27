@@ -37,3 +37,20 @@ onefile：
 ```
 
 可发布目录默认在 `release/SeaweedFSBrowser/`。
+
+## GitHub CI
+
+仓库已内置 GitHub Actions 工作流：
+
+- 文件路径：`.github/workflows/ci.yml`
+- 触发条件：
+  - push 到 `main`/`master`
+  - Pull Request
+  - 手动触发（`workflow_dispatch`）
+
+CI 包含两步：
+
+1. `syntax-check`：在 Ubuntu 上执行 Python 语法检查  
+2. `build-windows`：在 Windows 上执行 Nuitka 打包，并上传 `release/SeaweedFSBrowser` 作为 artifact
+
+你可以在 GitHub 的 `Actions` 页面进入对应运行，下载 `SeaweedFSBrowser-windows-<run_number>` 产物进行验证。

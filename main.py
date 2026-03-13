@@ -38,12 +38,20 @@ from PySide6.QtWidgets import (
 APP_NAME = "SeaweedFSBrowser"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
-PAGE_LIMIT = 100
+PAGE_LIMIT = 1000
 PREVIEW_MAX_BYTES = 262144
 GO_MODE_DIR_BIT = 0x80000000
-MAX_PAGES = 20000
+MAX_PAGES = 10000
 DOWNLOAD_CHUNK_SIZE = 65536
 MAX_HISTORY = 100
+
+
+def sanitize_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def get_config_path() -> str:
@@ -69,6 +77,7 @@ def get_resource_path(relative_path: str) -> str:
 class AppConfig:
     base_url: str = DEFAULT_BASE_URL
     root_dir: str = DEFAULT_ROOT_DIR
+    page_limit: int = PAGE_LIMIT
     base_url_history: List[str] = None
     root_dir_history: List[str] = None
     search_history: List[str] = None
@@ -95,6 +104,7 @@ def load_config() -> AppConfig:
         return AppConfig(
             base_url=str(raw.get("base_url", DEFAULT_BASE_URL)),
             root_dir=str(raw.get("root_dir", DEFAULT_ROOT_DIR)),
+            page_limit=sanitize_positive_int(raw.get("page_limit", PAGE_LIMIT), PAGE_LIMIT),
             base_url_history=[str(x) for x in base_hist_raw if isinstance(x, str)],
             root_dir_history=[str(x) for x in root_hist_raw if isinstance(x, str)],
             search_history=[str(x) for x in search_hist_raw if isinstance(x, str)],
@@ -108,6 +118,7 @@ def save_config(cfg: AppConfig) -> None:
     data = {
         "base_url": cfg.base_url,
         "root_dir": cfg.root_dir,
+        "page_limit": sanitize_positive_int(cfg.page_limit, PAGE_LIMIT),
         "base_url_history": cfg.base_url_history[:MAX_HISTORY],
         "root_dir_history": cfg.root_dir_history[:MAX_HISTORY],
         "search_history": cfg.search_history[:MAX_HISTORY],
@@ -264,6 +275,7 @@ class SeaweedClient:
         self,
         base_url: str,
         dir_path: str,
+        page_limit: int,
         on_progress: Optional[Callable[[int], None]] = None,
     ) -> List[Dict[str, Any]]:
         url = join_url(base_url, dir_path)
@@ -271,13 +283,14 @@ class SeaweedClient:
         last_file_name = ""
         seen_cursors = set()
         page_count = 0
+        effective_page_limit = sanitize_positive_int(page_limit, PAGE_LIMIT)
         while True:
             page_count += 1
             if page_count > MAX_PAGES:
                 raise RuntimeError("分页次数过多，已中断加载（可能是分页游标无效）")
             payload = http_get_json(
                 url,
-                params={"limit": PAGE_LIMIT, "lastFileName": last_file_name},
+                params={"limit": effective_page_limit, "lastFileName": last_file_name},
             )
             entries = payload.get("Entries") or []
             if not entries:
@@ -298,7 +311,7 @@ class SeaweedClient:
             last_file_name = next_cursor
             if payload.get("ShouldDisplayLoadMore") is False:
                 break
-            if len(entries) < PAGE_LIMIT:
+            if len(entries) < effective_page_limit:
                 break
         return all_entries
 
@@ -335,17 +348,19 @@ class DirectoryLoadWorker(QObject):
     error = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, client: SeaweedClient, base_url: str, dir_path: str):
+    def __init__(self, client: SeaweedClient, base_url: str, dir_path: str, page_limit: int):
         super().__init__()
         self.client = client
         self.base_url = base_url
         self.dir_path = dir_path
+        self.page_limit = page_limit
 
     def run(self) -> None:
         try:
             entries = self.client.list_dir(
                 self.base_url,
                 self.dir_path,
+                self.page_limit,
                 on_progress=self.progress.emit,
             )
             self.finished.emit(entries)
@@ -423,12 +438,13 @@ class SaveDirectoryWorker(QObject):
     cancelled = Signal(str)
     error = Signal(str)
 
-    def __init__(self, client: SeaweedClient, base_url: str, source_dir: str, target_dir: str):
+    def __init__(self, client: SeaweedClient, base_url: str, source_dir: str, target_dir: str, page_limit: int):
         super().__init__()
         self.client = client
         self.base_url = base_url
         self.source_dir = normalize_dir_path(source_dir)
         self.target_dir = target_dir
+        self.page_limit = page_limit
         self._cancelled = False
 
     def request_cancel(self) -> None:
@@ -484,7 +500,7 @@ class SaveDirectoryWorker(QObject):
             if self.is_cancelled():
                 raise RuntimeError("下载已取消")
             current = queue.pop(0)
-            entries = self.client.list_dir(self.base_url, current)
+            entries = self.client.list_dir(self.base_url, current, self.page_limit)
             scanned_dirs += 1
             for entry in entries:
                 full_path = normalize_dir_path(str(entry.get("FullPath", "")))
@@ -632,6 +648,7 @@ class MainWindow(QMainWindow):
     def save_current_config(self) -> None:
         self.config.base_url = self.get_base_url()
         self.config.root_dir = self.get_root_dir()
+        self.config.page_limit = sanitize_positive_int(self.config.page_limit, PAGE_LIMIT)
         save_config(self.config)
 
     def remember_input_histories(self, include_search: bool = False) -> None:
@@ -694,7 +711,12 @@ class MainWindow(QMainWindow):
         self._loading_dialog.show()
 
         self._loader_thread = QThread(self)
-        self._loader_worker = DirectoryLoadWorker(self.client, base_url, dir_path)
+        self._loader_worker = DirectoryLoadWorker(
+            self.client,
+            base_url,
+            dir_path,
+            self.config.page_limit,
+        )
         self._loader_worker.moveToThread(self._loader_thread)
 
         self._loader_thread.started.connect(self._loader_worker.run)
@@ -908,7 +930,13 @@ class MainWindow(QMainWindow):
         self._save_dialog.show()
 
         self._save_thread = QThread(self)
-        self._save_worker = SaveDirectoryWorker(self.client, base_url, self.current_dir, target_dir)
+        self._save_worker = SaveDirectoryWorker(
+            self.client,
+            base_url,
+            self.current_dir,
+            target_dir,
+            self.config.page_limit,
+        )
         self._save_worker.moveToThread(self._save_thread)
 
         self._save_thread.started.connect(self._save_worker.run)

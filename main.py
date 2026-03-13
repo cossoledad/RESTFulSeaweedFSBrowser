@@ -632,9 +632,10 @@ class MainWindow(QMainWindow):
 
     def show_about_dialog(self) -> None:
         about_text = (
-            "author: ganjb/ganjb@hustcad.com\n"
+            "author: ganjb\nganjb_at_hustcad_dot_com"
         )
-        QMessageBox.information(self, "关于", about_text)
+        dialog_parent = self if self.isVisible() else None
+        QMessageBox.information(dialog_parent, "关于", about_text)
 
     def get_base_url(self) -> str:
         return normalize_base_url(self.base_url_input.currentText())
@@ -1014,6 +1015,7 @@ def main() -> int:
     app.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     window = MainWindow()
+    window.show_about_dialog()
     window.show()
     return app.exec()
 

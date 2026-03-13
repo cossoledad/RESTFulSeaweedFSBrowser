@@ -197,6 +197,29 @@ def format_time(value: Any) -> str:
         return ""
 
 
+def parse_time_sort_value(value: Any) -> int:
+    if value is None or value == "":
+        return 0
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return 0
+        try:
+            if s.endswith("Z"):
+                dt = datetime.fromisoformat(s[:-1]).replace(tzinfo=timezone.utc)
+            else:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except Exception:
+            return sanitize_positive_int(s, 0)
+    ivalue = sanitize_positive_int(value, 0)
+    if ivalue > 10**12:
+        ivalue = ivalue // 10**9
+    return ivalue
+
+
 def format_size(size: Any) -> str:
     if size is None or size == "":
         return ""
@@ -249,6 +272,19 @@ def is_directory(entry: Dict[str, Any]) -> bool:
     if full_path.endswith("/"):
         return True
     return False
+
+
+class SortableTreeWidgetItem(QTreeWidgetItem):
+    def __lt__(self, other: "QTreeWidgetItem") -> bool:
+        tree = self.treeWidget()
+        if tree is None:
+            return super().__lt__(other)
+        column = tree.sortColumn()
+        left = self.data(column, Qt.ItemDataRole.UserRole + 1)
+        right = other.data(column, Qt.ItemDataRole.UserRole + 1)
+        if left is None or right is None:
+            return super().__lt__(other)
+        return left < right
 
 
 def http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -607,6 +643,8 @@ class MainWindow(QMainWindow):
         )
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         layout.addWidget(self.tree, 1)
 
@@ -767,27 +805,44 @@ class MainWindow(QMainWindow):
         self.tree.setEnabled(not loading)
 
     def render_entries(self) -> None:
+        sort_column = self.tree.sortColumn()
+        sort_order = self.tree.header().sortIndicatorOrder()
+        self.tree.setSortingEnabled(False)
         self.tree.clear()
         for entry in self.entries:
             full_path = str(entry.get("FullPath", ""))
             name = basename(full_path)
             dir_flag = is_directory(entry)
             type_text = "文件夹" if dir_flag else "文件"
-            size = format_size(entry.get("FileSize", "")) if not dir_flag else ""
+            file_size_raw = sanitize_positive_int(entry.get("FileSize", 0), 0) if not dir_flag else 0
+            size = format_size(file_size_raw) if not dir_flag else ""
+            mtime_raw = parse_time_sort_value(entry.get("Mtime", 0))
+            crtime_raw = parse_time_sort_value(entry.get("Crtime", 0))
             mtime = format_time(entry.get("Mtime"))
             crtime = format_time(entry.get("Crtime"))
             mime = str(entry.get("Mime", "")) if not dir_flag else ""
             md5 = str(entry.get("Md5", "")) if not dir_flag else ""
             mode_value = entry.get("Mode", "")
             mode_text = str(mode_value)
+            mode_sort = parse_mode_value(mode_value)
             chunks = entry.get("chunks") or []
-            chunks_text = str(len(chunks)) if isinstance(chunks, list) and not dir_flag else ""
-            item = QTreeWidgetItem(
+            chunks_count = len(chunks) if isinstance(chunks, list) and not dir_flag else 0
+            chunks_text = str(chunks_count) if chunks_count else ""
+            item = SortableTreeWidgetItem(
                 [name, type_text, size, mtime, crtime, mime, md5, mode_text, chunks_text]
             )
             item.setData(0, Qt.ItemDataRole.UserRole, full_path)
             item.setData(1, Qt.ItemDataRole.UserRole, dir_flag)
             item.setData(2, Qt.ItemDataRole.UserRole, entry)
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, name.lower())
+            item.setData(1, Qt.ItemDataRole.UserRole + 1, type_text)
+            item.setData(2, Qt.ItemDataRole.UserRole + 1, file_size_raw)
+            item.setData(3, Qt.ItemDataRole.UserRole + 1, mtime_raw)
+            item.setData(4, Qt.ItemDataRole.UserRole + 1, crtime_raw)
+            item.setData(5, Qt.ItemDataRole.UserRole + 1, mime.lower())
+            item.setData(6, Qt.ItemDataRole.UserRole + 1, md5.lower())
+            item.setData(7, Qt.ItemDataRole.UserRole + 1, mode_sort if mode_sort is not None else mode_text)
+            item.setData(8, Qt.ItemDataRole.UserRole + 1, chunks_count)
             tooltip_lines = [
                 f"FullPath: {full_path}",
                 f"Mode: {mode_text}",
@@ -799,6 +854,8 @@ class MainWindow(QMainWindow):
             ]
             item.setToolTip(0, "\n".join(tooltip_lines))
             self.tree.addTopLevelItem(item)
+        self.tree.setSortingEnabled(True)
+        self.tree.sortItems(sort_column, sort_order)
 
     def apply_search(self) -> None:
         self.remember_input_histories(include_search=True)

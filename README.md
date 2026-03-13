@@ -50,20 +50,3 @@ onefile：
 ```powershell
 .\build.ps1 -Mode onefile
 ```
-
-构建产物目录和文件名会自动带版本号，例如：
-
-- `release/SeaweedFSBrowser-v1.0.3-windows-x64-standalone/`
-- `release/SeaweedFSBrowser-v1.0.3-windows-x64-onefile/SeaweedFSBrowser-v1.0.3-windows-x64-onefile.exe`
-
-## CI / Release
-
-仓库内置 GitHub Actions 工作流：
-
-- `syntax-check`：执行 `python -m py_compile main.py`
-- `build-windows`：执行 Nuitka Windows 构建
-- `push` 到 `main` 或 `master` 且构建成功后，自动发布 GitHub Release
-
-Release 资产会自动带版本号，例如：
-
-- `SeaweedFSBrowser-v1.0.3-windows-x64-standalone.zip`

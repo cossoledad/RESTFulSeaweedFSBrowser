@@ -6,12 +6,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $AppName = "SeaweedFSBrowser"
+$MainPy = "main.py"
+$VersionMatch = Select-String -Path $MainPy -Pattern '^APP_VERSION = "([^"]+)"$'
+if (-not $VersionMatch) {
+    throw "未能从 $MainPy 解析 APP_VERSION"
+}
+$Version = $VersionMatch.Matches[0].Groups[1].Value
+$PackageBaseName = "$AppName-v$Version-windows-x64-$Mode"
 $BuildRoot = "build"
 $NuitkaOut = Join-Path $BuildRoot "nuitka"
 $ReleaseRoot = "release"
-$ReleaseDir = Join-Path $ReleaseRoot $AppName
+$ReleaseDir = Join-Path $ReleaseRoot $PackageBaseName
 
 Write-Host "构建模式: $Mode"
+Write-Host "程序版本: $Version"
 Write-Host "准备目录..."
 
 if (Test-Path $NuitkaOut) { Remove-Item -Recurse -Force $NuitkaOut }
@@ -54,7 +62,7 @@ if ($Mode -eq "onefile") {
     if (-not (Test-Path $oneFileExe)) {
         throw "未找到 onefile 产物: $oneFileExe"
     }
-    Copy-Item $oneFileExe -Destination (Join-Path $ReleaseDir "$AppName.exe") -Force
+    Copy-Item $oneFileExe -Destination (Join-Path $ReleaseDir "$PackageBaseName.exe") -Force
 } else {
     $distDir = Join-Path $NuitkaOut "$AppName.dist"
     if (-not (Test-Path $distDir)) {

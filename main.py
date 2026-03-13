@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
+APP_VERSION = "1.0.3"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -670,6 +671,7 @@ class MainWindow(QMainWindow):
 
     def show_about_dialog(self) -> None:
         about_text = (
+            f"version: {APP_VERSION}\n"
             "author: ganjb\nganjb_at_hustcad_dot_com"
         )
         dialog_parent = self if self.isVisible() else None

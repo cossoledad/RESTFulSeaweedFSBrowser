@@ -1074,7 +1074,7 @@ def main() -> int:
     app.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     window = MainWindow()
-    window.show_about_dialog()
+    # window.show_about_dialog()
     window.show()
     return app.exec()
 

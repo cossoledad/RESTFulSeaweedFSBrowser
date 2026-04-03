@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -570,6 +570,7 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.current_dir = normalize_dir_path(self.config.root_dir)
         self.entries: List[Dict[str, Any]] = []
+        self._directory_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._loader_thread: Optional[QThread] = None
         self._loader_worker: Optional[DirectoryLoadWorker] = None
         self._loading_dialog: Optional[QProgressDialog] = None
@@ -629,7 +630,7 @@ class MainWindow(QMainWindow):
 
         browser_toolbar = QHBoxLayout()
         self.up_btn = QPushButton("返回上级")
-        self.refresh_btn = QPushButton("刷新当前目录")
+        self.refresh_btn = QPushButton("刷新当前目录 (F5)")
         self.save_dir_btn = QPushButton("保存到本地")
         browser_toolbar.addWidget(self.up_btn)
         browser_toolbar.addWidget(self.refresh_btn)
@@ -650,6 +651,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tree, 1)
 
         self.init_menu_bar()
+        self.refresh_action = QAction("刷新当前目录", self)
+        self.refresh_action.setShortcut("F5")
+        self.refresh_action.triggered.connect(self.refresh_current_directory)
+        self.addAction(self.refresh_action)
         self.statusBar().showMessage("就绪")
 
         self.load_root_btn.clicked.connect(self.load_root_directory)
@@ -661,7 +666,7 @@ class MainWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
 
-        self.refresh_current_directory()
+        self.load_directory(self.current_dir, force_reload=False)
 
     def init_menu_bar(self) -> None:
         help_menu = self.menuBar().addMenu("帮助")
@@ -721,10 +726,25 @@ class MainWindow(QMainWindow):
 
     def load_root_directory(self) -> None:
         self.remember_input_histories(include_search=False)
-        self.current_dir = self.get_root_dir()
-        self.refresh_current_directory()
+        self.load_directory(self.get_root_dir(), force_reload=False)
 
     def refresh_current_directory(self) -> None:
+        self.load_directory(self.current_dir, force_reload=True)
+
+    def build_directory_cache_key(self, base_url: str, dir_path: str) -> str:
+        return f"{normalize_base_url(base_url)}|{normalize_dir_path(dir_path)}"
+
+    def try_apply_cached_directory(self, base_url: str, dir_path: str) -> bool:
+        cache_key = self.build_directory_cache_key(base_url, dir_path)
+        cached_entries = self._directory_cache.get(cache_key)
+        if cached_entries is None:
+            return False
+        self.entries = list(cached_entries)
+        self.render_entries()
+        self.statusBar().showMessage(f"已从缓存加载 {len(cached_entries)} 条，按 F5 可重新加载")
+        return True
+
+    def load_directory(self, dir_path: str, force_reload: bool) -> None:
         base_url = self.get_base_url()
         if not base_url:
             QMessageBox.warning(self, "参数错误", "地址不能为空")
@@ -735,9 +755,12 @@ class MainWindow(QMainWindow):
         if self._loader_thread and self._loader_thread.isRunning():
             self.statusBar().showMessage("正在加载，请稍候...")
             return
+        self.current_dir = normalize_dir_path(dir_path)
         self.remember_input_histories(include_search=False)
-        self.statusBar().showMessage("正在加载...")
         self.path_label.setText(f"当前位置: {self.current_dir}")
+        if not force_reload and self.try_apply_cached_directory(base_url, self.current_dir):
+            return
+        self.statusBar().showMessage("正在加载...")
         self.start_directory_load(base_url, self.current_dir)
 
     def start_directory_load(self, base_url: str, dir_path: str) -> None:
@@ -773,6 +796,8 @@ class MainWindow(QMainWindow):
 
     def on_directory_load_finished(self, entries: List[Dict[str, Any]]) -> None:
         self.entries = entries
+        cache_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
+        self._directory_cache[cache_key] = list(entries)
         self.render_entries()
         self.statusBar().showMessage(f"已加载 {len(entries)} 条")
 
@@ -873,8 +898,7 @@ class MainWindow(QMainWindow):
         full_path = str(item.data(0, Qt.ItemDataRole.UserRole))
         is_dir = bool(item.data(1, Qt.ItemDataRole.UserRole))
         if is_dir:
-            self.current_dir = normalize_dir_path(full_path)
-            self.refresh_current_directory()
+            self.load_directory(full_path, force_reload=False)
             return
         self.open_preview(full_path)
 
@@ -911,7 +935,7 @@ class MainWindow(QMainWindow):
             self.current_dir = "/" + "/".join(parts) if parts else "/"
         if not self.current_dir.startswith(root_dir):
             self.current_dir = self.get_root_dir()
-        self.refresh_current_directory()
+        self.load_directory(self.current_dir, force_reload=False)
 
     def open_preview(self, full_path: str) -> None:
         try:
@@ -1074,7 +1098,6 @@ def main() -> int:
     app.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     window = MainWindow()
-    # window.show_about_dialog()
     window.show()
     return app.exec()
 

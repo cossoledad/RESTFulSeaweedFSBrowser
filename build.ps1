@@ -17,6 +17,8 @@ $BuildRoot = "build"
 $NuitkaOut = Join-Path $BuildRoot "nuitka"
 $ReleaseRoot = "release"
 $ReleaseDir = Join-Path $ReleaseRoot $PackageBaseName
+$PngIcon = Join-Path "resource" "seaweedfs.png"
+$IcoIcon = Join-Path "resource" "seaweedfs.ico"
 
 Write-Host "构建模式: $Mode"
 Write-Host "程序版本: $Version"
@@ -27,11 +29,17 @@ if (Test-Path $ReleaseDir) { Remove-Item -Recurse -Force $ReleaseDir }
 New-Item -ItemType Directory -Path $NuitkaOut | Out-Null
 New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
 
+if (Test-Path $PngIcon) {
+    Write-Host "生成 Windows 图标文件..."
+    python .\scripts\make_ico_from_png.py $PngIcon $IcoIcon
+}
+
 $args = @(
     "-m", "nuitka",
     "--enable-plugin=pyside6",
     "--assume-yes-for-downloads",
     "--windows-console-mode=disable",
+    "--windows-icon-from-ico=$IcoIcon",
     "--include-data-dir=resource=resource",
     "--output-dir=$NuitkaOut",
     "--output-filename=$AppName.exe",

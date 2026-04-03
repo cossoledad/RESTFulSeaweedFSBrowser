@@ -55,6 +55,7 @@ MAX_HISTORY = 100
 SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 WINDOW_ICON_HANDLES: List[int] = []
+F3D_RUNTIME_DLL_NAMES = ["f3d.dll", "vcruntime140.dll", "zlib.dll"]
 
 
 def sanitize_positive_int(value: Any, default: int) -> int:
@@ -170,6 +171,27 @@ def get_windows_icon_path() -> str:
     if os.path.exists(ico_path):
         return ico_path
     return ""
+
+
+def ensure_f3d_runtime_layout() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    base_dir = get_base_dir()
+    f3d_bin_dir = os.path.join(base_dir, "f3d", "bin")
+    if os.path.isdir(f3d_bin_dir):
+        return
+
+    copied_any = False
+    os.makedirs(f3d_bin_dir, exist_ok=True)
+    for dll_name in F3D_RUNTIME_DLL_NAMES:
+        source_path = os.path.join(base_dir, dll_name)
+        target_path = os.path.join(f3d_bin_dir, dll_name)
+        if os.path.exists(source_path) and not os.path.exists(target_path):
+            shutil.copy2(source_path, target_path)
+            copied_any = True
+
+    if not copied_any and not os.listdir(f3d_bin_dir):
+        shutil.rmtree(os.path.join(base_dir, "f3d"), ignore_errors=True)
 
 
 def load_windows_app_icon_handle() -> int:
@@ -480,6 +502,7 @@ def apply_windows_window_icon_later() -> None:
 
 
 def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
+    ensure_f3d_runtime_layout()
     try:
         import f3d
     except ImportError:

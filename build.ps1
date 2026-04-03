@@ -58,7 +58,10 @@ if ($F3dPackageDir) {
     $F3dBinDir = Join-Path $F3dPackageDir "bin"
     $F3dShareDir = Join-Path $F3dPackageDir "share"
     if (Test-Path $F3dBinDir) {
-        $args += "--include-data-dir=$F3dBinDir=f3d/bin"
+        $f3dBinFiles = Get-ChildItem -Path $F3dBinDir -File
+        foreach ($f3dBinFile in $f3dBinFiles) {
+            $args += "--include-data-files=$($f3dBinFile.FullName)=f3d/bin/$($f3dBinFile.Name)"
+        }
     }
     if (Test-Path $F3dShareDir) {
         $args += "--include-data-dir=$F3dShareDir=f3d/share"

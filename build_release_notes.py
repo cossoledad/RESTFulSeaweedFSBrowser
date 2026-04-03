@@ -10,9 +10,12 @@ def main() -> int:
     version = sys.argv[1].strip()
     output_path = sys.argv[2]
     notes_path = os.path.join("release-notes", f"v{version}.md")
-
     if not os.path.exists(notes_path):
-        raise FileNotFoundError(f"发布说明文件不存在: {notes_path}")
+        fallback_path = f"release_notes_v{version}.md"
+        if os.path.exists(fallback_path):
+            notes_path = fallback_path
+        else:
+            raise FileNotFoundError(f"发布说明文件不存在: {notes_path}")
 
     with open(notes_path, "r", encoding="utf-8") as f:
         notes = f.read().strip()

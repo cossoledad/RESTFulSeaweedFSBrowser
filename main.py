@@ -1,6 +1,7 @@
 import json
 import os
 import posixpath
+import random
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 # 减少 Windows 下字体探测产生的大量告警输出。
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QThread, Qt, Signal
 from PySide6.QtGui import QAction, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,7 +43,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -53,6 +54,7 @@ DOWNLOAD_CHUNK_SIZE = 65536
 MAX_HISTORY = 100
 SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+WINDOW_ICON_HANDLES: List[int] = []
 
 
 def sanitize_positive_int(value: Any, default: int) -> int:
@@ -168,6 +170,32 @@ def get_windows_icon_path() -> str:
     if os.path.exists(ico_path):
         return ico_path
     return ""
+
+
+def load_windows_app_icon_handle() -> int:
+    if not sys.platform.startswith("win"):
+        return 0
+
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    shell32 = ctypes.windll.shell32
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x0010
+
+    if getattr(sys, "frozen", False):
+        small_icon = ctypes.c_void_p()
+        large_icon = ctypes.c_void_p()
+        extracted = shell32.ExtractIconExW(sys.executable, 0, ctypes.byref(large_icon), ctypes.byref(small_icon), 1)
+        if extracted > 0:
+            handle = large_icon.value or small_icon.value or 0
+            if handle:
+                return int(handle)
+
+    icon_path = get_windows_icon_path()
+    if not icon_path:
+        return 0
+    return int(user32.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE) or 0)
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -404,37 +432,49 @@ def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> None:
     subprocess.Popen(args, **popen_kwargs)
 
 
-def apply_windows_window_icon_later(window_title: str) -> None:
+def apply_windows_window_icon_later() -> None:
     if not sys.platform.startswith("win"):
-        return
-    icon_path = get_windows_icon_path()
-    if not icon_path:
         return
 
     def worker() -> None:
         import ctypes
 
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         WM_SETICON = 0x0080
         ICON_SMALL = 0
         ICON_BIG = 1
-        IMAGE_ICON = 1
-        LR_LOADFROMFILE = 0x0010
+        GCLP_HICON = -14
+        GCLP_HICONSM = -34
 
-        icon_handle = user32.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+        target_pid = kernel32.GetCurrentProcessId()
+        icon_handle = load_windows_app_icon_handle()
         if not icon_handle:
             return
-        try:
-            deadline = time.time() + 5.0
-            while time.time() < deadline:
-                hwnd = user32.FindWindowW(None, window_title)
-                if hwnd:
+        WINDOW_ICON_HANDLES.append(icon_handle)
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        hwnd_list: List[int] = []
+
+        def enum_windows_proc(hwnd, _lparam):
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value != target_pid or not user32.IsWindowVisible(hwnd):
+                return True
+            hwnd_list.append(hwnd)
+            return True
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            hwnd_list.clear()
+            user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
+            if hwnd_list:
+                for hwnd in hwnd_list:
+                    user32.SetClassLongPtrW(hwnd, GCLP_HICON, icon_handle)
+                    user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, icon_handle)
                     user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
                     user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
-                    return
-                time.sleep(0.1)
-        finally:
-            user32.DestroyIcon(icon_handle)
+            time.sleep(0.2)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -448,17 +488,38 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
 
     try:
         engine = f3d.Engine.create()
-        window_title = f"{APP_NAME} - 模型预览"
-        engine.window.set_window_name(window_title)
-        apply_windows_window_icon_later(window_title)
+        window_width = 960
+        window_height = 720
+        engine.window.set_window_name(f"{APP_NAME} - 模型预览")
         try:
-            engine.window.size = (960, 720)
+            engine.window.size = (window_width, window_height)
         except Exception:
             pass
+        if sys.platform.startswith("win"):
+            try:
+                import ctypes
+
+                user32 = ctypes.windll.user32
+                screen_w = user32.GetSystemMetrics(0)
+                screen_h = user32.GetSystemMetrics(1)
+                pos_x = max(0, (screen_w - window_width) // 2)
+                pos_y = max(0, (screen_h - window_height) // 2)
+                engine.window.set_position(pos_x, pos_y)
+            except Exception:
+                pass
+        apply_windows_window_icon_later()
         try:
             engine.scene.add(model_path)
         except RuntimeError as e:
             raise RuntimeError(f"F3D 无法加载模型: {model_path}") from e
+        try:
+            camera = engine.window.camera
+            camera.reset_to_bounds(0.9)
+            camera.azimuth(random.choice([35, 55, 125, 145, 215, 235, 305, 325]))
+            camera.elevation(random.choice([-25, -15, 15, 25, 35]))
+            camera.set_current_as_default()
+        except Exception:
+            pass
         engine.interactor.start()
         return 0
     finally:
@@ -605,6 +666,108 @@ class PreviewDialog(QDialog):
             self._on_save_as()
 
 
+class ImagePreviewArea(QScrollArea):
+    zoomChanged = Signal(float)
+
+    def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._original_pixmap = pixmap
+        self._scale_factor = 1.0
+        self._drag_active = False
+        self._drag_start = QPoint()
+        self._drag_h_value = 0
+        self._drag_v_value = 0
+
+        self.setWidgetResizable(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setBackgroundRole(self.backgroundRole())
+        self.setStyleSheet("QScrollArea { background: #111; border: 1px solid #444; }")
+
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWidget(self.image_label)
+        self.update_pixmap()
+
+    @property
+    def scale_factor(self) -> float:
+        return self._scale_factor
+
+    def reset_zoom(self) -> None:
+        self._scale_factor = 1.0
+        self.update_pixmap()
+        self.zoomChanged.emit(self._scale_factor)
+
+    def zoom_by(self, multiplier: float, anchor_pos=None) -> None:
+        old_factor = self._scale_factor
+        new_factor = max(0.05, min(8.0, old_factor * multiplier))
+        if abs(new_factor - old_factor) < 1e-9:
+            return
+        self._scale_factor = new_factor
+        self.update_pixmap()
+        self.zoomChanged.emit(self._scale_factor)
+        scale_change = new_factor / old_factor
+        if anchor_pos is None:
+            return
+        h_bar = self.horizontalScrollBar()
+        v_bar = self.verticalScrollBar()
+        h_bar.setValue(int((h_bar.value() + anchor_pos.x()) * scale_change - anchor_pos.x()))
+        v_bar.setValue(int((v_bar.value() + anchor_pos.y()) * scale_change - anchor_pos.y()))
+
+    def update_pixmap(self) -> None:
+        scaled = self._original_pixmap.scaled(
+            max(1, int(self._original_pixmap.width() * self._scale_factor)),
+            max(1, int(self._original_pixmap.height() * self._scale_factor)),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+
+    def wheelEvent(self, event) -> None:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        multiplier = 1.15 if delta > 0 else 1 / 1.15
+        self.zoom_by(multiplier, event.position().toPoint())
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.reset_zoom()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_active = True
+            self._drag_start = event.position().toPoint()
+            self._drag_h_value = self.horizontalScrollBar().value()
+            self._drag_v_value = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_active:
+            delta = event.position().toPoint() - self._drag_start
+            self.horizontalScrollBar().setValue(self._drag_h_value - delta.x())
+            self.verticalScrollBar().setValue(self._drag_v_value - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_active:
+            self._drag_active = False
+            self.viewport().unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ImagePreviewDialog(QDialog):
     def __init__(
         self,
@@ -622,51 +785,42 @@ class ImagePreviewDialog(QDialog):
         if self._pixmap.isNull():
             raise RuntimeError("无法加载图片")
 
-        self.info_label = QLabel(
-            f"{self._pixmap.width()} x {self._pixmap.height()} px"
-        )
-        self.image_label = QLabel(self)
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scroll.setWidget(self.image_label)
-        self._scroll_area = scroll
+        self.info_label = QLabel()
+        self.preview_area = ImagePreviewArea(self._pixmap, self)
+        self.preview_area.zoomChanged.connect(self.on_zoom_changed)
 
         buttons = QDialogButtonBox(self)
         self.save_btn = buttons.addButton("另存为本地文件", QDialogButtonBox.ButtonRole.ActionRole)
+        self.reset_btn = buttons.addButton("重置缩放", QDialogButtonBox.ButtonRole.ActionRole)
         close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
         self.save_btn.setEnabled(on_save_as is not None)
         self.save_btn.clicked.connect(self.handle_save_as)
+        self.reset_btn.clicked.connect(self.handle_reset_zoom)
         close_btn.clicked.connect(self.accept)
 
         layout = QVBoxLayout()
         layout.addWidget(self.info_label)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self.preview_area, 1)
         layout.addWidget(buttons)
         self.setLayout(layout)
-        self.update_preview_pixmap()
+        self.update_info_label()
 
     def handle_save_as(self) -> None:
         if self._on_save_as is not None:
             self._on_save_as()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.update_preview_pixmap()
+    def handle_reset_zoom(self) -> None:
+        self.preview_area.reset_zoom()
+        self.update_info_label()
 
-    def update_preview_pixmap(self) -> None:
-        viewport_size = self._scroll_area.viewport().size()
-        if viewport_size.width() <= 0 or viewport_size.height() <= 0:
-            self.image_label.setPixmap(self._pixmap)
-            return
-        scaled = self._pixmap.scaled(
-            viewport_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+    def update_info_label(self) -> None:
+        zoom_percent = int(round(self.preview_area.scale_factor * 100))
+        self.info_label.setText(
+            f"{self._pixmap.width()} x {self._pixmap.height()} px | 缩放 {zoom_percent}% | 滚轮缩放，左键拖拽，双击重置"
         )
-        self.image_label.setPixmap(scaled)
+
+    def on_zoom_changed(self, _: float) -> None:
+        self.update_info_label()
 
 
 class EntryDetailDialog(QDialog):

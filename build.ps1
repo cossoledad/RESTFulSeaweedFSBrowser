@@ -19,6 +19,7 @@ $ReleaseRoot = "release"
 $ReleaseDir = Join-Path $ReleaseRoot $PackageBaseName
 $PngIcon = Join-Path "resource" "seaweedfs.png"
 $IcoIcon = Join-Path "resource" "seaweedfs.ico"
+$F3dPackageDir = ""
 
 Write-Host "构建模式: $Mode"
 Write-Host "程序版本: $Version"
@@ -34,6 +35,12 @@ if (Test-Path $PngIcon) {
     python .\scripts\make_ico_from_png.py $PngIcon $IcoIcon
 }
 
+try {
+    $F3dPackageDir = (python -c "import f3d, pathlib; print(pathlib.Path(f3d.__file__).resolve().parent)" | Select-Object -Last 1).Trim()
+} catch {
+    $F3dPackageDir = ""
+}
+
 $args = @(
     "-m", "nuitka",
     "--enable-plugin=pyside6",
@@ -46,6 +53,17 @@ $args = @(
     "--remove-output",
     "main.py"
 )
+
+if ($F3dPackageDir) {
+    $F3dBinDir = Join-Path $F3dPackageDir "bin"
+    $F3dShareDir = Join-Path $F3dPackageDir "share"
+    if (Test-Path $F3dBinDir) {
+        $args += "--include-data-dir=$F3dBinDir=f3d/bin"
+    }
+    if (Test-Path $F3dShareDir) {
+        $args += "--include-data-dir=$F3dShareDir=f3d/share"
+    }
+}
 
 if ($Mode -eq "onefile") {
     $args += "--onefile"

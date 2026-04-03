@@ -1,7 +1,12 @@
 import json
 import os
+import posixpath
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QAction, QFontDatabase, QIcon
+from PySide6.QtGui import QAction, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -28,6 +33,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -36,7 +42,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -45,6 +51,8 @@ GO_MODE_DIR_BIT = 0x80000000
 MAX_PAGES = 10000
 DOWNLOAD_CHUNK_SIZE = 65536
 MAX_HISTORY = 100
+SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 
 
 def sanitize_positive_int(value: Any, default: int) -> int:
@@ -145,6 +153,23 @@ def open_path_in_file_explorer(path: str) -> None:
         subprocess.Popen(["xdg-open", path])
 
 
+def get_preview_runtime_args() -> List[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
+
+def get_app_window_icon() -> QIcon:
+    return QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png")))
+
+
+def get_windows_icon_path() -> str:
+    ico_path = get_resource_path(os.path.join("resource", "seaweedfs.ico"))
+    if os.path.exists(ico_path):
+        return ico_path
+    return ""
+
+
 def normalize_base_url(base_url: str) -> str:
     return base_url.strip().rstrip("/")
 
@@ -168,6 +193,70 @@ def basename(path: str) -> str:
         return "/"
     name = stripped.split("/")[-1]
     return name or "/"
+
+
+def get_path_extension(path: str) -> str:
+    _, ext = os.path.splitext(path)
+    return ext.lower()
+
+
+def replace_extension(path: str, new_extension: str) -> str:
+    base, _ = os.path.splitext(path)
+    return base + new_extension
+
+
+def is_external_resource_uri(uri: str) -> bool:
+    parsed = urllib.parse.urlparse(uri)
+    return bool(parsed.scheme) and parsed.scheme.lower() not in {"data"}
+
+
+def normalize_relative_resource_path(uri: str) -> str:
+    normalized = posixpath.normpath(uri.replace("\\", "/"))
+    if normalized in {"", "."}:
+        raise ValueError("资源路径为空")
+    if normalized.startswith("/") or normalized.startswith("../") or normalized == "..":
+        raise ValueError(f"暂不支持越级资源路径: {uri}")
+    return normalized
+
+
+def sniff_model_format(local_file_path: str) -> str:
+    with open(local_file_path, "rb") as f:
+        head = f.read(64)
+    if len(head) >= 4 and head[:4] == b"glTF":
+        return "glb"
+    text_head = head.lstrip()
+    if text_head.startswith(b"{") or text_head.startswith(b"["):
+        return "gltf"
+    return "unknown"
+
+
+def collect_gltf_resource_paths(gltf_file_path: str) -> List[str]:
+    with open(gltf_file_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    resource_paths: List[str] = []
+    for key in ("buffers", "images"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri")
+            if not isinstance(uri, str):
+                continue
+            stripped = uri.strip()
+            if not stripped or stripped.startswith("data:") or is_external_resource_uri(stripped):
+                continue
+            resource_paths.append(normalize_relative_resource_path(stripped))
+    seen = set()
+    ordered_paths: List[str] = []
+    for resource_path in resource_paths:
+        if resource_path in seen:
+            continue
+        seen.add(resource_path)
+        ordered_paths.append(resource_path)
+    return ordered_paths
 
 
 def format_time(value: Any) -> str:
@@ -307,6 +396,76 @@ def http_get_bytes(url: str) -> bytes:
         return resp.read(PREVIEW_MAX_BYTES)
 
 
+def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> None:
+    args = get_preview_runtime_args() + ["--f3d-preview", model_path, "--cleanup-dir", cleanup_dir]
+    popen_kwargs: Dict[str, Any] = {}
+    if sys.platform.startswith("win"):
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(args, **popen_kwargs)
+
+
+def apply_windows_window_icon_later(window_title: str) -> None:
+    if not sys.platform.startswith("win"):
+        return
+    icon_path = get_windows_icon_path()
+    if not icon_path:
+        return
+
+    def worker() -> None:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+
+        icon_handle = user32.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
+        if not icon_handle:
+            return
+        try:
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                hwnd = user32.FindWindowW(None, window_title)
+                if hwnd:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
+                    return
+                time.sleep(0.1)
+        finally:
+            user32.DestroyIcon(icon_handle)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
+    try:
+        import f3d
+    except ImportError:
+        print("缺少依赖: f3d。请先执行 pip install f3d", file=sys.stderr)
+        return 1
+
+    try:
+        engine = f3d.Engine.create()
+        window_title = f"{APP_NAME} - 模型预览"
+        engine.window.set_window_name(window_title)
+        apply_windows_window_icon_later(window_title)
+        try:
+            engine.window.size = (960, 720)
+        except Exception:
+            pass
+        try:
+            engine.scene.add(model_path)
+        except RuntimeError as e:
+            raise RuntimeError(f"F3D 无法加载模型: {model_path}") from e
+        engine.interactor.start()
+        return 0
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+
 class SeaweedClient:
     def list_dir(
         self,
@@ -439,11 +598,75 @@ class PreviewDialog(QDialog):
         layout.addWidget(text)
         layout.addWidget(buttons)
         self.setLayout(layout)
-        self.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
+        self.setWindowIcon(get_app_window_icon())
 
     def handle_save_as(self) -> None:
         if self._on_save_as is not None:
             self._on_save_as()
+
+
+class ImagePreviewDialog(QDialog):
+    def __init__(
+        self,
+        title: str,
+        image_path: str,
+        on_save_as: Optional[Callable[[], None]] = None,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(960, 720)
+        self.setWindowIcon(get_app_window_icon())
+        self._on_save_as = on_save_as
+        self._pixmap = QPixmap(image_path)
+        if self._pixmap.isNull():
+            raise RuntimeError("无法加载图片")
+
+        self.info_label = QLabel(
+            f"{self._pixmap.width()} x {self._pixmap.height()} px"
+        )
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll.setWidget(self.image_label)
+        self._scroll_area = scroll
+
+        buttons = QDialogButtonBox(self)
+        self.save_btn = buttons.addButton("另存为本地文件", QDialogButtonBox.ButtonRole.ActionRole)
+        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        self.save_btn.setEnabled(on_save_as is not None)
+        self.save_btn.clicked.connect(self.handle_save_as)
+        close_btn.clicked.connect(self.accept)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.info_label)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+        self.update_preview_pixmap()
+
+    def handle_save_as(self) -> None:
+        if self._on_save_as is not None:
+            self._on_save_as()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_preview_pixmap()
+
+    def update_preview_pixmap(self) -> None:
+        viewport_size = self._scroll_area.viewport().size()
+        if viewport_size.width() <= 0 or viewport_size.height() <= 0:
+            self.image_label.setPixmap(self._pixmap)
+            return
+        scaled = self._pixmap.scaled(
+            viewport_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
 
 
 class EntryDetailDialog(QDialog):
@@ -451,7 +674,7 @@ class EntryDetailDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(920, 680)
-        self.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
+        self.setWindowIcon(get_app_window_icon())
 
         text = QPlainTextEdit(self)
         text.setReadOnly(True)
@@ -564,7 +787,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("SeaweedFS 文件浏览器")
         self.resize(1080, 720)
-        self.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
+        self.setWindowIcon(get_app_window_icon())
 
         self.client = SeaweedClient()
         self.config = load_config()
@@ -938,6 +1161,10 @@ class MainWindow(QMainWindow):
         self.load_directory(self.current_dir, force_reload=False)
 
     def open_preview(self, full_path: str) -> None:
+        if self.try_open_model_preview(full_path):
+            return
+        if self.try_open_image_preview(full_path):
+            return
         try:
             base_url = self.get_base_url()
             text = self.client.preview_file(base_url, full_path)
@@ -956,6 +1183,87 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "预览失败", "该文件不是文本，或编码不支持。")
         except Exception as e:
             QMessageBox.critical(self, "预览失败", str(e))
+
+    def try_open_image_preview(self, full_path: str) -> bool:
+        if get_path_extension(full_path) not in SUPPORTED_IMAGE_EXTENSIONS:
+            return False
+        temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
+        local_image_path = os.path.join(temp_dir, basename(full_path))
+        try:
+            self.client.download_file_to_local(self.get_base_url(), full_path, local_image_path)
+            dlg = ImagePreviewDialog(
+                f"图片预览: {full_path}",
+                local_image_path,
+                on_save_as=lambda: self.save_single_file_to_local(full_path),
+                parent=self,
+            )
+            dlg.exec()
+        except urllib.error.HTTPError as e:
+            QMessageBox.critical(self, "图片预览失败", f"{e.code} {e.reason}")
+        except urllib.error.URLError as e:
+            QMessageBox.critical(self, "图片预览失败", str(e.reason))
+        except Exception as e:
+            QMessageBox.critical(self, "图片预览失败", str(e))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return True
+
+    def try_open_model_preview(self, full_path: str) -> bool:
+        if get_path_extension(full_path) not in SUPPORTED_F3D_MODEL_EXTENSIONS:
+            return False
+        try:
+            self.open_model_preview(full_path)
+            return True
+        except urllib.error.HTTPError as e:
+            QMessageBox.critical(self, "模型预览失败", f"{e.code} {e.reason}")
+        except urllib.error.URLError as e:
+            QMessageBox.critical(self, "模型预览失败", str(e.reason))
+        except Exception as e:
+            QMessageBox.critical(self, "模型预览失败", str(e))
+        return True
+
+    def open_model_preview(self, full_path: str) -> None:
+        try:
+            import f3d  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError("当前环境未安装 f3d，请先执行: pip install f3d") from e
+
+        ext = get_path_extension(full_path).lstrip(".") or "model"
+        temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-{ext}-")
+        original_local_path = os.path.join(temp_dir, basename(full_path))
+        base_url = self.get_base_url()
+        self.client.download_file_to_local(base_url, full_path, original_local_path)
+
+        detected_format = sniff_model_format(original_local_path)
+        local_model_path = original_local_path
+        if detected_format == "glb" and get_path_extension(original_local_path) != ".glb":
+            local_model_path = replace_extension(original_local_path, ".glb")
+            os.replace(original_local_path, local_model_path)
+        elif detected_format == "gltf":
+            if get_path_extension(original_local_path) != ".gltf":
+                local_model_path = replace_extension(original_local_path, ".gltf")
+                os.replace(original_local_path, local_model_path)
+            self.download_gltf_sidecar_resources(base_url, full_path, temp_dir, local_model_path)
+
+        launch_f3d_preview_subprocess(local_model_path, temp_dir)
+        self.statusBar().showMessage(f"已打开模型预览: {basename(full_path)}")
+
+    def download_gltf_sidecar_resources(
+        self,
+        base_url: str,
+        remote_model_path: str,
+        temp_dir: str,
+        local_model_path: str,
+    ) -> None:
+        remote_dir = posixpath.dirname(normalize_dir_path(remote_model_path))
+        for resource_path in collect_gltf_resource_paths(local_model_path):
+            remote_resource_path = normalize_dir_path(posixpath.join(remote_dir, resource_path))
+            local_resource_path = os.path.join(temp_dir, *resource_path.split("/"))
+            resolved_local_path = os.path.abspath(local_resource_path)
+            resolved_temp_dir = os.path.abspath(temp_dir)
+            if not resolved_local_path.startswith(resolved_temp_dir + os.sep) and resolved_local_path != resolved_temp_dir:
+                raise RuntimeError(f"资源路径越界，已拒绝下载: {resource_path}")
+            self.client.download_file_to_local(base_url, remote_resource_path, resolved_local_path)
 
     def save_single_file_to_local(self, full_path: str) -> None:
         default_name = basename(full_path)
@@ -1094,8 +1402,15 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if len(sys.argv) >= 3 and sys.argv[1] == "--f3d-preview":
+        model_path = sys.argv[2]
+        cleanup_dir = ""
+        if len(sys.argv) >= 5 and sys.argv[3] == "--cleanup-dir":
+            cleanup_dir = sys.argv[4]
+        return run_f3d_preview(model_path, cleanup_dir)
+
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png"))))
+    app.setWindowIcon(get_app_window_icon())
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     window = MainWindow()
     window.show()

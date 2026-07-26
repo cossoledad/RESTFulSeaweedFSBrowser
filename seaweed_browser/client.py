@@ -20,6 +20,7 @@ from .core import (
     join_url,
     sanitize_positive_int,
 )
+from .i18n import tr
 
 
 CancelCheck = Optional[Callable[[], bool]]
@@ -43,7 +44,7 @@ class SeaweedHttpError(RuntimeError):
 
 def ensure_not_cancelled(cancel_check: CancelCheck) -> None:
     if cancel_check is not None and cancel_check():
-        raise OperationCancelled("操作已取消")
+        raise OperationCancelled(tr("操作已取消"))
 
 
 def http_get_json(
@@ -90,7 +91,7 @@ def open_http_connection(
 ) -> tuple[http.client.HTTPConnection, str]:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError(f"不支持的服务地址: {url}")
+        raise ValueError(tr("不支持的服务地址: {url}", url=url))
     port = parsed.port
     if parsed.scheme == "https":
         connection: http.client.HTTPConnection = http.client.HTTPSConnection(
@@ -114,7 +115,7 @@ def open_http_connection(
 def read_json_response(response: http.client.HTTPResponse) -> Dict[str, Any]:
     raw = response.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024:
-        return {"raw": "服务器响应内容过大"}
+        return {"raw": tr("服务器响应内容过大")}
     if not raw:
         return {}
     try:
@@ -169,7 +170,7 @@ class SeaweedClient:
         ensure_not_cancelled(cancel_check)
         stat_before = os.stat(local_file_path)
         if not os.path.isfile(local_file_path):
-            raise ValueError(f"不是普通文件: {local_file_path}")
+            raise ValueError(tr("不是普通文件: {path}", path=local_file_path))
         total = stat_before.st_size
         url = join_url(base_url, full_path)
         connection, request_target = open_http_connection(url, timeout=60)
@@ -187,7 +188,7 @@ class SeaweedClient:
                     ensure_not_cancelled(cancel_check)
                     chunk = source.read(min(DOWNLOAD_CHUNK_SIZE, total - uploaded))
                     if not chunk:
-                        raise OSError("本地文件在上传过程中被截断")
+                        raise OSError(tr("本地文件在上传过程中被截断"))
                     connection.send(chunk)
                     digest.update(chunk)
                     uploaded += len(chunk)
@@ -204,12 +205,12 @@ class SeaweedClient:
                 stat_after.st_size != stat_before.st_size
                 or stat_after.st_mtime_ns != stat_before.st_mtime_ns
             ):
-                raise RuntimeError("本地文件在上传过程中发生变化，请重新上传")
+                raise RuntimeError(tr("本地文件在上传过程中发生变化，请重新上传"))
 
             local_md5 = base64.b64encode(digest.digest()).decode("ascii")
             remote_md5 = response.getheader("Content-MD5", "")
             if remote_md5 and remote_md5 != local_md5:
-                raise RuntimeError("上传已完成，但服务器返回的 MD5 校验值不一致")
+                raise RuntimeError(tr("上传已完成，但服务器返回的 MD5 校验值不一致"))
             payload["verified"] = bool(remote_md5)
             payload["uploaded_bytes"] = uploaded
             return payload
@@ -234,7 +235,9 @@ class SeaweedClient:
             ensure_not_cancelled(cancel_check)
             page_count += 1
             if page_count > MAX_PAGES:
-                raise RuntimeError("分页次数过多，已中断加载（可能是分页游标无效）")
+                raise RuntimeError(
+                    tr("分页次数过多，已中断加载（可能是分页游标无效）")
+                )
             payload = http_get_json(
                 url,
                 params={"limit": effective_page_limit, "lastFileName": last_file_name},

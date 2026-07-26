@@ -7,9 +7,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
+from .i18n import DEFAULT_LANGUAGE, normalize_language, tr
+
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -54,6 +56,7 @@ def get_config_path() -> str:
 
 @dataclass
 class AppConfig:
+    language: str = DEFAULT_LANGUAGE
     base_url: str = DEFAULT_BASE_URL
     root_dir: str = DEFAULT_ROOT_DIR
     page_limit: int = PAGE_LIMIT
@@ -78,6 +81,7 @@ def load_config() -> AppConfig:
         root_hist_raw = raw.get("root_dir_history", [])
         search_hist_raw = raw.get("search_history", [])
         return AppConfig(
+            language=normalize_language(raw.get("language", DEFAULT_LANGUAGE)),
             base_url=str(raw.get("base_url", DEFAULT_BASE_URL)),
             root_dir=str(raw.get("root_dir", DEFAULT_ROOT_DIR)),
             page_limit=sanitize_positive_int(raw.get("page_limit", PAGE_LIMIT), PAGE_LIMIT),
@@ -120,6 +124,7 @@ def load_config() -> AppConfig:
 def save_config(cfg: AppConfig) -> None:
     path = get_config_path()
     data = {
+        "language": normalize_language(cfg.language),
         "base_url": cfg.base_url,
         "root_dir": cfg.root_dir,
         "page_limit": sanitize_positive_int(cfg.page_limit, PAGE_LIMIT),
@@ -208,13 +213,13 @@ def basename(path: str) -> str:
 def validate_remote_child_name(name: str) -> str:
     value = name.strip()
     if not value:
-        raise ValueError("名称不能为空")
+        raise ValueError(tr("名称不能为空"))
     if value in {".", ".."}:
-        raise ValueError("名称不能为 . 或 ..")
+        raise ValueError(tr("名称不能为 . 或 .."))
     if "/" in value or "\\" in value:
-        raise ValueError("名称不能包含路径分隔符")
+        raise ValueError(tr("名称不能包含路径分隔符"))
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("名称不能包含控制字符")
+        raise ValueError(tr("名称不能包含控制字符"))
     return value
 
 
@@ -248,9 +253,9 @@ def replace_extension(path: str, new_extension: str) -> str:
 def normalize_relative_path(path: str) -> str:
     normalized = posixpath.normpath(path.replace("\\", "/"))
     if normalized in {"", "."}:
-        raise ValueError("相对路径为空")
+        raise ValueError(tr("相对路径为空"))
     if normalized.startswith("/") or normalized.startswith("../") or normalized == "..":
-        raise ValueError(f"路径越界: {path}")
+        raise ValueError(tr("路径越界: {path}", path=path))
     return normalized
 
 
@@ -261,9 +266,9 @@ def safe_local_path(root_dir: str, relative_path: str) -> str:
     try:
         common = os.path.commonpath([root, target])
     except ValueError as e:
-        raise ValueError(f"路径越界: {relative_path}") from e
+        raise ValueError(tr("路径越界: {path}", path=relative_path)) from e
     if os.path.normcase(common) != os.path.normcase(root):
-        raise ValueError(f"路径越界: {relative_path}")
+        raise ValueError(tr("路径越界: {path}", path=relative_path))
     return target
 
 

@@ -2,7 +2,7 @@
 
 用于浏览 SeaweedFS Filer 中的文件与目录。
 
-当前版本：`1.0.13`
+当前版本：`1.0.14`
 
 ## Windows 下载
 
@@ -16,6 +16,7 @@
 
 ## 功能
 
+- 界面支持简体中文、English 和 Français，可在“语言”菜单即时切换并持久化选择
 - `Base URL` 输入框，默认值从本地配置加载（如 `http://10.1.23.81:38888`）
 - `根目录` 输入框，默认值从本地配置加载（如 `/buckets/cax-dev/PARTING/`）
 - `PAGE_LIMIT` 支持写入本地配置文件，通过 `config.json` 中的 `page_limit` 调整单次分页大小
@@ -47,6 +48,7 @@
 
 - `main.py`：应用入口、主窗口和 F3D 子进程入口
 - `seaweed_browser/core.py`：版本、配置、路径和格式化规则
+- `seaweed_browser/i18n.py`：语言选择、中文回退以及英文和法文翻译目录
 - `seaweed_browser/client.py`：SeaweedFS HTTP 访问、流式上传与原子下载
 - `seaweed_browser/tasks.py`：上传、下载、目录加载和预览后台 Worker
 - `seaweed_browser/task_models.py`：统一任务状态、进度和错误模型
@@ -75,6 +77,7 @@ Windows 下默认保存在：
 
 ```json
 {
+  "language": "zh_CN",
   "base_url": "http://10.1.23.81:38888",
   "root_dir": "/buckets/cax-dev/files/",
   "page_limit": 1000,

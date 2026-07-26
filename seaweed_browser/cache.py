@@ -1,6 +1,8 @@
 from collections import OrderedDict
 from typing import Generic, Iterator, Optional, Tuple, TypeVar, cast
 
+from .i18n import tr
+
 
 K = TypeVar("K")
 V = TypeVar("V")
@@ -12,7 +14,7 @@ class LruCache(Generic[K, V]):
 
     def __init__(self, max_entries: int):
         if max_entries <= 0:
-            raise ValueError("max_entries 必须大于 0")
+            raise ValueError(tr("max_entries 必须大于 0"))
         self.max_entries = max_entries
         self._items: OrderedDict[K, V] = OrderedDict()
 

@@ -90,6 +90,7 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as appdata:
             with patch.dict(os.environ, {"APPDATA": appdata}):
                 config = AppConfig(
+                    language="fr",
                     base_url="http://localhost:8888",
                     root_dir="/buckets/test/",
                     page_limit=250,
@@ -103,6 +104,7 @@ class CoreTests(unittest.TestCase):
                 save_config(config)
                 self.assertTrue(os.path.exists(get_config_path()))
                 loaded = load_config()
+                self.assertEqual(loaded.language, "fr")
                 self.assertEqual(loaded.base_url, config.base_url)
                 self.assertEqual(loaded.root_dir, config.root_dir)
                 self.assertEqual(loaded.page_limit, 250)

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional
 
 from .client import OperationCancelled, SeaweedClient, ensure_not_cancelled
+from .i18n import tr
 
 
 CancelCheck = Optional[Callable[[], bool]]
@@ -43,10 +44,15 @@ def build_upload_items(
     for local_path in local_paths:
         absolute_path = os.path.abspath(local_path)
         if not os.path.isfile(absolute_path):
-            raise ValueError(f"不是普通文件: {local_path}")
+            raise ValueError(tr("不是普通文件: {path}", path=local_path))
         remote_path = join_child(remote_directory, os.path.basename(absolute_path))
         if remote_path in seen_targets:
-            raise ValueError(f"上传列表包含重复目标名称: {os.path.basename(absolute_path)}")
+            raise ValueError(
+                tr(
+                    "上传列表包含重复目标名称: {name}",
+                    name=os.path.basename(absolute_path),
+                )
+            )
         seen_targets.add(remote_path)
         items.append(
             UploadItem(
@@ -67,7 +73,7 @@ def upload_files_concurrently(
     on_progress: ProgressCallback = None,
 ) -> UploadBatchResult:
     if max_workers <= 0:
-        raise ValueError("max_workers 必须大于 0")
+        raise ValueError(tr("max_workers 必须大于 0"))
 
     item_list = list(items)
     total_files = len(item_list)

@@ -14,6 +14,7 @@ from .cancellation import CancellationToken
 from .client import OperationCancelled, SeaweedClient
 from .core import (
     APP_NAME,
+    DIRECTORY_DOWNLOAD_WORKERS,
     basename,
     get_path_extension,
     is_directory,
@@ -21,6 +22,7 @@ from .core import (
     replace_extension,
     safe_local_path,
 )
+from .downloads import DownloadItem, download_files_concurrently
 from .model_files import collect_gltf_resource_paths, sniff_model_format
 
 
@@ -98,6 +100,11 @@ class TaskManager(QObject):
 
     def keys(self) -> List[str]:
         return list(self._tasks)
+
+    def count(self, prefix: str = "") -> int:
+        if not prefix:
+            return len(self._tasks)
+        return sum(key.startswith(prefix) for key in self._tasks)
 
 
 def format_worker_error(prefix: str, error: Exception) -> str:
@@ -293,6 +300,7 @@ class SaveDirectoryWorker(CancellableWorker):
         source_dir: str,
         target_dir: str,
         page_limit: int,
+        max_download_workers: int = DIRECTORY_DOWNLOAD_WORKERS,
     ):
         super().__init__()
         self.client = client
@@ -300,25 +308,37 @@ class SaveDirectoryWorker(CancellableWorker):
         self.source_dir = normalize_dir_path(source_dir)
         self.target_dir = os.path.abspath(target_dir)
         self.page_limit = page_limit
+        self.max_download_workers = max_download_workers
 
     def run(self) -> None:
         try:
             files = self.collect_files()
             total_files = len(files)
-            downloaded = 0
             source_prefix = self.source_dir.rstrip("/") or "/"
-            for full_path in files:
-                self.token.raise_if_cancelled()
-                rel_path = self.make_relative_path(full_path, source_prefix)
-                local_path = safe_local_path(self.target_dir, rel_path)
-                self.client.download_file_to_local(
-                    self.base_url,
-                    full_path,
-                    local_path,
-                    cancel_check=self.is_cancelled,
+            items = (
+                DownloadItem(
+                    remote_path=full_path,
+                    local_path=safe_local_path(
+                        self.target_dir,
+                        self.make_relative_path(full_path, source_prefix),
+                    ),
                 )
-                downloaded += 1
-                self.progress.emit("download", 0, total_files, downloaded, full_path)
+                for full_path in files
+            )
+            downloaded = download_files_concurrently(
+                self.client,
+                self.base_url,
+                items,
+                max_workers=self.max_download_workers,
+                cancel_check=self.is_cancelled,
+                on_progress=lambda completed, total, current: self.progress.emit(
+                    "download",
+                    0,
+                    total,
+                    completed,
+                    current,
+                ),
+            )
             self.finished.emit(
                 {
                     "total_files": total_files,

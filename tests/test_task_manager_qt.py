@@ -30,12 +30,16 @@ class TaskManagerQtTests(unittest.TestCase):
         completed = []
         manager.all_finished.connect(lambda: (completed.append(True), app.quit()))
         manager.start("busy", worker, (worker.finished, worker.cancelled, worker.error))
+        self.assertEqual(manager.count(), 1)
+        self.assertEqual(manager.count("busy"), 1)
+        self.assertEqual(manager.count("preview-load:"), 0)
         QTimer.singleShot(20, manager.cancel_all)
         QTimer.singleShot(2000, app.quit)
         app.exec()
 
         self.assertEqual(completed, [True])
         self.assertFalse(manager.has_active_tasks())
+        self.assertEqual(manager.count(), 0)
         self.assertTrue(worker.is_cancelled())
 
 

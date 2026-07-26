@@ -33,6 +33,12 @@ class LruCache(Generic[K, V]):
     def clear(self) -> None:
         self._items.clear()
 
+    def remove(self, key: K) -> Optional[V]:
+        value = self._items.pop(key, _MISSING)
+        if value is _MISSING:
+            return None
+        return cast(V, value)
+
     def __len__(self) -> int:
         return len(self._items)
 

@@ -7,10 +7,13 @@ from seaweed_browser.core import (
     AppConfig,
     get_config_path,
     join_url,
+    join_remote_child,
     load_config,
+    remote_path_is_within_root,
     safe_local_path,
     sanitize_bounded_int,
     save_config,
+    validate_remote_child_name,
 )
 
 
@@ -33,6 +36,28 @@ class CoreTests(unittest.TestCase):
                 os.path.normcase(os.path.realpath(target)),
                 os.path.normcase(os.path.realpath(expected)),
             )
+
+    def test_remote_child_name_is_validated_and_joined(self) -> None:
+        self.assertEqual(
+            join_remote_child("/bucket/current/", "中文 文件.txt"),
+            "/bucket/current/中文 文件.txt",
+        )
+        for invalid_name in ("", ".", "..", "../escape", "nested/file", "bad\\file", "bad\x00file"):
+            with self.subTest(invalid_name=invalid_name):
+                with self.assertRaises(ValueError):
+                    validate_remote_child_name(invalid_name)
+
+    def test_remote_path_must_remain_inside_configured_root(self) -> None:
+        self.assertTrue(remote_path_is_within_root("/bucket/root", "/bucket/root/"))
+        self.assertTrue(
+            remote_path_is_within_root("/bucket/root/nested/file", "/bucket/root/")
+        )
+        self.assertFalse(
+            remote_path_is_within_root("/bucket/root-other", "/bucket/root/")
+        )
+        self.assertFalse(
+            remote_path_is_within_root("/bucket/root/../outside", "/bucket/root/")
+        )
 
     def test_sanitize_bounded_int_uses_safe_range(self) -> None:
         self.assertEqual(sanitize_bounded_int(4, 2, 16), 4)
@@ -70,6 +95,7 @@ class CoreTests(unittest.TestCase):
                     page_limit=250,
                     directory_cache_max_entries=8,
                     directory_download_workers=2,
+                    upload_workers=5,
                     max_concurrent_preview_loads=2,
                     max_concurrent_file_saves=1,
                     base_url_history=["http://localhost:8888"],
@@ -82,6 +108,7 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(loaded.page_limit, 250)
                 self.assertEqual(loaded.directory_cache_max_entries, 8)
                 self.assertEqual(loaded.directory_download_workers, 2)
+                self.assertEqual(loaded.upload_workers, 5)
                 self.assertEqual(loaded.max_concurrent_preview_loads, 2)
                 self.assertEqual(loaded.max_concurrent_file_saves, 1)
 

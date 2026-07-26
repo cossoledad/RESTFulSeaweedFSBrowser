@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -37,6 +38,7 @@ from seaweed_browser.core import (
     APP_NAME,
     APP_VERSION,
     MAX_HISTORY,
+    PAGE_LIMIT,
     SUPPORTED_F3D_MODEL_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS,
     basename,
@@ -45,22 +47,27 @@ from seaweed_browser.core import (
     get_config_path,
     get_path_extension,
     is_directory,
+    join_remote_child,
     load_config,
     normalize_base_url,
     normalize_dir_path,
     parse_mode_value,
     parse_time_sort_value,
+    remote_path_is_within_root,
     sanitize_positive_int,
     save_config,
     update_history,
 )
 from seaweed_browser.tasks import (
+    CreateDirectoryWorker,
     DirectoryLoadWorker,
     FileDownloadWorker,
     PreviewLoadWorker,
     SaveDirectoryWorker,
     TaskManager,
+    UploadBatchWorker,
 )
+from seaweed_browser.uploads import UploadItem, build_upload_items
 from seaweed_browser.resources import (
     get_app_window_icon,
     get_base_dir,
@@ -276,6 +283,8 @@ class ModelPreviewProcess:
 class MainWindow(QMainWindow):
     DIRECTORY_LOAD_TASK = "directory-load"
     DIRECTORY_SAVE_TASK = "directory-save"
+    CREATE_DIRECTORY_TASK = "create-directory"
+    UPLOAD_BATCH_TASK = "upload-batch"
 
     def __init__(self):
         super().__init__()
@@ -292,10 +301,14 @@ class MainWindow(QMainWindow):
         )
         self._loading_dialog: Optional[QProgressDialog] = None
         self._save_dialog: Optional[QProgressDialog] = None
+        self._create_directory_dialog: Optional[QProgressDialog] = None
+        self._upload_dialog: Optional[QProgressDialog] = None
         self._file_save_dialogs: Dict[str, QProgressDialog] = {}
         self._preview_windows: Dict[str, QWidget] = {}
         self._preview_load_dialogs: Dict[str, QProgressDialog] = {}
         self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
+        self._pending_directory_refreshes = set()
+        self._pending_upload_retry: Optional[tuple[str, str, List[str]]] = None
         self._task_manager = TaskManager(self)
         self._task_manager.task_finished.connect(self.on_managed_task_finished)
         self._task_manager.all_finished.connect(self.on_all_tasks_finished)
@@ -360,9 +373,13 @@ class MainWindow(QMainWindow):
         self.up_btn = QPushButton("返回上级")
         self.refresh_btn = QPushButton("刷新当前目录 (F5)")
         self.save_dir_btn = QPushButton("保存到本地")
+        self.create_dir_btn = QPushButton("新建文件夹")
+        self.upload_files_btn = QPushButton("上传文件")
         browser_toolbar.addWidget(self.up_btn)
         browser_toolbar.addWidget(self.refresh_btn)
         browser_toolbar.addWidget(self.save_dir_btn)
+        browser_toolbar.addWidget(self.create_dir_btn)
+        browser_toolbar.addWidget(self.upload_files_btn)
         browser_toolbar.addStretch(1)
         layout.addLayout(browser_toolbar)
 
@@ -390,6 +407,8 @@ class MainWindow(QMainWindow):
         self.search_btn.clicked.connect(self.apply_search)
         self.up_btn.clicked.connect(self.go_up_directory)
         self.save_dir_btn.clicked.connect(self.save_current_directory_to_local)
+        self.create_dir_btn.clicked.connect(self.create_remote_directory)
+        self.upload_files_btn.clicked.connect(self.select_files_to_upload)
         self.open_config_btn.clicked.connect(self.open_config_directory)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
@@ -553,6 +572,13 @@ class MainWindow(QMainWindow):
             self._loading_dialog.deleteLater()
             self._loading_dialog = None
         self.set_loading_ui(False)
+        current_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
+        if current_key in self._pending_directory_refreshes:
+            self._pending_directory_refreshes.discard(current_key)
+            QTimer.singleShot(
+                0,
+                lambda path=self.current_dir: self.load_directory(path, force_reload=True),
+            )
 
     def set_loading_ui(self, loading: bool) -> None:
         self.base_url_input.setEnabled(not loading)
@@ -561,6 +587,8 @@ class MainWindow(QMainWindow):
         self.load_root_btn.setEnabled(not loading)
         self.refresh_btn.setEnabled(not loading)
         self.save_dir_btn.setEnabled(not loading)
+        self.create_dir_btn.setEnabled(not loading)
+        self.upload_files_btn.setEnabled(not loading)
         self.search_btn.setEnabled(not loading)
         self.search_input.setEnabled(not loading)
         self.up_btn.setEnabled(not loading)
@@ -639,13 +667,352 @@ class MainWindow(QMainWindow):
 
     def show_tree_context_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
-        if item is None:
-            return
         menu = QMenu(self)
-        details_action = menu.addAction("查看详细信息")
+        create_action = menu.addAction("新建文件夹")
+        upload_action = menu.addAction("上传文件")
+        details_action = None
+        if item is not None:
+            menu.addSeparator()
+            details_action = menu.addAction("查看详细信息")
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
-        if action == details_action:
+        if action == create_action:
+            self.create_remote_directory()
+        elif action == upload_action:
+            self.select_files_to_upload()
+        elif details_action is not None and action == details_action:
             self.open_entry_details(item)
+
+    def existing_entries_by_name(self) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for entry in self.entries:
+            full_path = str(entry.get("FullPath", "")).strip()
+            if full_path:
+                result[basename(full_path)] = entry
+        return result
+
+    def invalidate_remote_directory(self, base_url: str, directory: str) -> None:
+        cache_key = self.build_directory_cache_key(base_url, directory)
+        self._directory_cache.remove(cache_key)
+        if (
+            normalize_base_url(base_url) != self.get_base_url()
+            or normalize_dir_path(directory) != self.current_dir
+        ):
+            return
+        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
+            self._pending_directory_refreshes.add(cache_key)
+            return
+        QTimer.singleShot(
+            0,
+            lambda path=directory: self.load_directory(path, force_reload=True),
+        )
+
+    def create_remote_directory(self) -> None:
+        if self._task_manager.contains(self.CREATE_DIRECTORY_TASK):
+            QMessageBox.information(self, "任务进行中", "已有目录创建任务正在执行。")
+            return
+        base_url = self.get_base_url()
+        if not base_url:
+            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            return
+        if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
+            QMessageBox.warning(self, "路径错误", "当前目录超出配置的根目录，拒绝写入。")
+            return
+        name, accepted = QInputDialog.getText(self, "新建文件夹", "文件夹名称:")
+        if not accepted:
+            return
+        try:
+            target_path = join_remote_child(self.current_dir, name)
+        except ValueError as error:
+            QMessageBox.warning(self, "名称无效", str(error))
+            return
+
+        existing = self.existing_entries_by_name().get(basename(target_path))
+        if existing is not None:
+            message = (
+                "同名文件夹已经存在。"
+                if is_directory(existing)
+                else "同名文件已经存在，不能创建文件夹。"
+            )
+            QMessageBox.information(self, "名称冲突", message)
+            return
+
+        parent_dir = self.current_dir
+        dialog = QProgressDialog(
+            f"正在创建文件夹...\n{target_path}",
+            "取消",
+            0,
+            0,
+            self,
+        )
+        dialog.setWindowTitle("创建文件夹")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.show()
+        self._create_directory_dialog = dialog
+
+        worker = CreateDirectoryWorker(
+            self.client,
+            base_url,
+            parent_dir,
+            target_path,
+        )
+        dialog.canceled.connect(
+            lambda: self._task_manager.cancel(self.CREATE_DIRECTORY_TASK)
+        )
+        worker.finished.connect(self.on_create_directory_finished)
+        worker.cancelled.connect(
+            lambda: self.on_create_directory_cancelled(base_url, parent_dir)
+        )
+        worker.error.connect(
+            lambda message: self.on_create_directory_failed(
+                base_url,
+                parent_dir,
+                message,
+            )
+        )
+        self._task_manager.start(
+            self.CREATE_DIRECTORY_TASK,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
+        )
+        self.statusBar().showMessage(f"正在创建文件夹: {basename(target_path)}")
+
+    def on_create_directory_finished(self, result: Dict[str, Any]) -> None:
+        base_url = str(result.get("base_url", ""))
+        parent_dir = str(result.get("parent_dir", ""))
+        target_path = str(result.get("target_path", ""))
+        self.invalidate_remote_directory(base_url, parent_dir)
+        if not self._closing_after_task_cancel:
+            self.statusBar().showMessage(f"文件夹已创建: {basename(target_path)}")
+
+    def on_create_directory_cancelled(self, base_url: str, parent_dir: str) -> None:
+        self.invalidate_remote_directory(base_url, parent_dir)
+        if not self._closing_after_task_cancel:
+            self.statusBar().showMessage("目录创建已取消，正在确认远程状态")
+
+    def on_create_directory_failed(
+        self,
+        base_url: str,
+        parent_dir: str,
+        message: str,
+    ) -> None:
+        self.invalidate_remote_directory(base_url, parent_dir)
+        if not self._closing_after_task_cancel:
+            QMessageBox.critical(self, "创建文件夹失败", message)
+            self.statusBar().showMessage("目录创建失败")
+
+    def select_files_to_upload(self) -> None:
+        if self._task_manager.contains(self.UPLOAD_BATCH_TASK):
+            QMessageBox.information(
+                self,
+                "上传进行中",
+                "已有上传批次正在执行，请等待完成或先取消。",
+            )
+            return
+        base_url = self.get_base_url()
+        if not base_url:
+            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            return
+        if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
+            QMessageBox.warning(self, "路径错误", "当前目录超出配置的根目录，拒绝写入。")
+            return
+        local_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择要上传的文件",
+            "",
+            "所有文件 (*)",
+        )
+        if not local_paths:
+            return
+        self.prepare_upload_batch(local_paths, base_url, self.current_dir)
+
+    def prepare_upload_batch(
+        self,
+        local_paths: List[str],
+        base_url: str,
+        target_dir: str,
+        confirm_overwrite: bool = True,
+    ) -> None:
+        try:
+            items = build_upload_items(local_paths, target_dir, join_remote_child)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "无法上传", str(error))
+            return
+
+        existing = self.existing_entries_by_name()
+        blocked_names = [
+            basename(item.remote_path)
+            for item in items
+            if (
+                basename(item.remote_path) in existing
+                and is_directory(existing[basename(item.remote_path)])
+            )
+        ]
+        if blocked_names:
+            shown = "\n".join(blocked_names[:10])
+            if len(blocked_names) > 10:
+                shown += f"\n...另有 {len(blocked_names) - 10} 项"
+            QMessageBox.warning(
+                self,
+                "存在目录冲突",
+                f"以下名称已经是远程文件夹，不能作为文件覆盖:\n{shown}",
+            )
+            blocked = set(blocked_names)
+            items = [item for item in items if basename(item.remote_path) not in blocked]
+        if not items:
+            return
+
+        overwrite_count = sum(
+            1
+            for item in items
+            if basename(item.remote_path) in existing
+            and not is_directory(existing[basename(item.remote_path)])
+        )
+        if confirm_overwrite and overwrite_count:
+            answer = QMessageBox.question(
+                self,
+                "确认覆盖上传",
+                f"{overwrite_count} 个同名文件将被覆盖。\n"
+                f"本次共上传 {len(items)} 个文件，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.start_upload_batch(items, base_url, target_dir)
+
+    def start_upload_batch(
+        self,
+        items: List[UploadItem],
+        base_url: str,
+        target_dir: str,
+    ) -> None:
+        if self._task_manager.contains(self.UPLOAD_BATCH_TASK):
+            return
+        total_bytes = sum(item.size for item in items)
+        dialog = QProgressDialog(
+            f"准备上传 {len(items)} 个文件，共 {format_size(total_bytes)}...",
+            "取消",
+            0,
+            100,
+            self,
+        )
+        dialog.setWindowTitle("上传文件")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.show()
+        self._upload_dialog = dialog
+
+        worker = UploadBatchWorker(
+            self.client,
+            base_url,
+            target_dir,
+            items,
+            self.config.upload_workers,
+        )
+        dialog.canceled.connect(
+            lambda: self._task_manager.cancel(self.UPLOAD_BATCH_TASK)
+        )
+        worker.progress.connect(self.on_upload_progress)
+        worker.finished.connect(self.on_upload_finished)
+        worker.cancelled.connect(
+            lambda: self.on_upload_cancelled(base_url, target_dir)
+        )
+        worker.error.connect(
+            lambda message: self.on_upload_failed(base_url, target_dir, message)
+        )
+        self._task_manager.start(
+            self.UPLOAD_BATCH_TASK,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
+        )
+        self.statusBar().showMessage(f"开始上传 {len(items)} 个文件")
+
+    def on_upload_progress(
+        self,
+        uploaded_bytes: int,
+        total_bytes: int,
+        completed_files: int,
+        total_files: int,
+        current_path: str,
+    ) -> None:
+        if self._upload_dialog is None:
+            return
+        if total_bytes > 0:
+            percent = min(100, int(uploaded_bytes * 100 / total_bytes))
+        else:
+            percent = min(100, int(completed_files * 100 / max(total_files, 1)))
+        self._upload_dialog.setValue(percent)
+        self._upload_dialog.setLabelText(
+            f"正在上传文件...\n"
+            f"文件: {completed_files}/{total_files}\n"
+            f"数据: {format_size(uploaded_bytes)} / {format_size(total_bytes)}\n"
+            f"当前: {basename(current_path)}"
+        )
+        self.statusBar().showMessage(
+            f"上传中... {completed_files}/{total_files}，{percent}%"
+        )
+
+    def on_upload_finished(self, result: Dict[str, Any]) -> None:
+        base_url = str(result.get("base_url", ""))
+        target_dir = str(result.get("target_dir", ""))
+        uploaded_files = int(result.get("uploaded_files", 0))
+        total_files = int(result.get("total_files", 0))
+        failures = result.get("failures") or []
+        self.invalidate_remote_directory(base_url, target_dir)
+        if self._closing_after_task_cancel:
+            return
+        self.statusBar().showMessage(f"上传完成: {uploaded_files}/{total_files}")
+        if not failures:
+            QMessageBox.information(
+                self,
+                "上传完成",
+                f"已上传 {uploaded_files}/{total_files} 个文件。",
+            )
+            return
+
+        details = "\n".join(
+            f"{basename(str(failure.get('remote_path', '')))}: {failure.get('error', '')}"
+            for failure in failures[:8]
+            if isinstance(failure, dict)
+        )
+        if len(failures) > 8:
+            details += f"\n...另有 {len(failures) - 8} 项"
+        answer = QMessageBox.question(
+            self,
+            "部分文件上传失败",
+            f"已上传 {uploaded_files}/{total_files} 个文件。\n\n{details}\n\n是否重试失败项？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            retry_paths = [
+                str(failure.get("local_path", ""))
+                for failure in failures
+                if isinstance(failure, dict) and failure.get("local_path")
+            ]
+            self._pending_upload_retry = (base_url, target_dir, retry_paths)
+
+    def on_upload_cancelled(self, base_url: str, target_dir: str) -> None:
+        self.invalidate_remote_directory(base_url, target_dir)
+        if not self._closing_after_task_cancel:
+            self.statusBar().showMessage("上传已取消，正在确认远程状态")
+
+    def on_upload_failed(
+        self,
+        base_url: str,
+        target_dir: str,
+        message: str,
+    ) -> None:
+        self.invalidate_remote_directory(base_url, target_dir)
+        if not self._closing_after_task_cancel:
+            QMessageBox.critical(self, "上传失败", message)
+            self.statusBar().showMessage("上传失败")
 
     def open_entry_details(self, item: QTreeWidgetItem) -> None:
         entry = item.data(2, Qt.ItemDataRole.UserRole)
@@ -1108,12 +1475,45 @@ class MainWindow(QMainWindow):
             self._save_dialog = None
         self.set_loading_ui(False)
 
+    def on_create_directory_thread_cleaned(self) -> None:
+        if self._create_directory_dialog is not None:
+            self._create_directory_dialog.close()
+            self._create_directory_dialog.deleteLater()
+            self._create_directory_dialog = None
+
+    def on_upload_thread_cleaned(self) -> None:
+        if self._upload_dialog is not None:
+            self._upload_dialog.close()
+            self._upload_dialog.deleteLater()
+            self._upload_dialog = None
+        retry = self._pending_upload_retry
+        self._pending_upload_retry = None
+        if retry is None or self._closing_after_task_cancel:
+            return
+        base_url, target_dir, local_paths = retry
+        try:
+            items = build_upload_items(local_paths, target_dir, join_remote_child)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "无法重试上传", str(error))
+            return
+        if items:
+            QTimer.singleShot(
+                0,
+                lambda: self.start_upload_batch(items, base_url, target_dir),
+            )
+
     def on_managed_task_finished(self, task_key: str) -> None:
         if task_key == self.DIRECTORY_LOAD_TASK:
             self.on_directory_load_thread_cleaned()
             return
         if task_key == self.DIRECTORY_SAVE_TASK:
             self.on_save_thread_cleaned()
+            return
+        if task_key == self.CREATE_DIRECTORY_TASK:
+            self.on_create_directory_thread_cleaned()
+            return
+        if task_key == self.UPLOAD_BATCH_TASK:
+            self.on_upload_thread_cleaned()
             return
         if task_key.startswith("preview-load:"):
             preview_key = task_key[len("preview-load:") :]
@@ -1150,6 +1550,12 @@ class MainWindow(QMainWindow):
             if self._save_dialog is not None:
                 self._save_dialog.setLabelText("正在取消目录保存，请稍候...")
                 self._save_dialog.hide()
+            if self._create_directory_dialog is not None:
+                self._create_directory_dialog.setLabelText("正在取消目录创建，请稍候...")
+                self._create_directory_dialog.hide()
+            if self._upload_dialog is not None:
+                self._upload_dialog.setLabelText("正在取消上传，请稍候...")
+                self._upload_dialog.hide()
             event.ignore()
             return
 

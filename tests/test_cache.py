@@ -35,6 +35,16 @@ class LruCacheTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             LruCache(0)
 
+    def test_remove_invalidates_only_selected_entry(self) -> None:
+        cache: LruCache[str, int] = LruCache(2)
+        cache.put("first", 1)
+        cache.put("second", 2)
+
+        self.assertEqual(cache.remove("first"), 1)
+        self.assertIsNone(cache.get("first"))
+        self.assertEqual(cache.get("second"), 2)
+        self.assertIsNone(cache.remove("missing"))
+
 
 if __name__ == "__main__":
     unittest.main()

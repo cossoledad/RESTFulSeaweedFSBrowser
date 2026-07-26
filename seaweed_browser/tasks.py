@@ -2,6 +2,7 @@ import os
 import posixpath
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 from collections import deque
@@ -11,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from .cancellation import CancellationToken
-from .client import OperationCancelled, SeaweedClient
+from .client import OperationCancelled, SeaweedClient, SeaweedHttpError
 from .core import (
     APP_NAME,
     DIRECTORY_DOWNLOAD_WORKERS,
@@ -24,6 +25,7 @@ from .core import (
 )
 from .downloads import DownloadItem, download_files_concurrently
 from .model_files import collect_gltf_resource_paths, sniff_model_format
+from .uploads import UploadItem, upload_files_concurrently
 
 
 class CancellableWorker(QObject):
@@ -108,11 +110,143 @@ class TaskManager(QObject):
 
 
 def format_worker_error(prefix: str, error: Exception) -> str:
+    if isinstance(error, SeaweedHttpError):
+        messages = {
+            403: "服务器拒绝写入，可能没有权限或受到 WORM 策略限制",
+            409: "目标名称与现有文件或目录冲突",
+            413: "服务器拒绝了文件大小",
+        }
+        description = messages.get(error.status, str(error))
+        if error.detail and error.detail not in description:
+            description = f"{description}\n{error.detail}"
+        return description
     if isinstance(error, urllib.error.HTTPError):
         return f"HTTP 错误: {error.code} {error.reason}"
     if isinstance(error, urllib.error.URLError):
         return f"网络错误: {error.reason}"
     return f"{prefix}: {error}"
+
+
+class CreateDirectoryWorker(CancellableWorker):
+    finished = Signal(dict)
+    cancelled = Signal()
+    error = Signal(str)
+
+    def __init__(
+        self,
+        client: SeaweedClient,
+        base_url: str,
+        parent_dir: str,
+        target_path: str,
+    ):
+        super().__init__()
+        self.client = client
+        self.base_url = base_url
+        self.parent_dir = parent_dir
+        self.target_path = target_path
+
+    def run(self) -> None:
+        try:
+            payload = self.client.create_directory(
+                self.base_url,
+                self.target_path,
+                cancel_check=self.is_cancelled,
+            )
+            self.finished.emit(
+                {
+                    "base_url": self.base_url,
+                    "parent_dir": self.parent_dir,
+                    "target_path": self.target_path,
+                    "response": payload,
+                }
+            )
+        except OperationCancelled:
+            self.cancelled.emit()
+        except Exception as error:
+            self.error.emit(format_worker_error("创建目录失败", error))
+
+
+class UploadBatchWorker(CancellableWorker):
+    progress = Signal(int, int, int, int, str)
+    finished = Signal(dict)
+    cancelled = Signal()
+    error = Signal(str)
+
+    def __init__(
+        self,
+        client: SeaweedClient,
+        base_url: str,
+        target_dir: str,
+        items: List[UploadItem],
+        max_workers: int,
+    ):
+        super().__init__()
+        self.client = client
+        self.base_url = base_url
+        self.target_dir = target_dir
+        self.items = list(items)
+        self.max_workers = max_workers
+
+    def run(self) -> None:
+        try:
+            last_progress_emit = 0.0
+            progress_emit_lock = threading.Lock()
+
+            def emit_progress(
+                uploaded_bytes: int,
+                total_bytes: int,
+                completed_files: int,
+                total_files: int,
+                current_path: str,
+            ) -> None:
+                nonlocal last_progress_emit
+                with progress_emit_lock:
+                    now = time.monotonic()
+                    if (
+                        completed_files < total_files
+                        and uploaded_bytes < total_bytes
+                        and now - last_progress_emit < 0.1
+                    ):
+                        return
+                    last_progress_emit = now
+                self.progress.emit(
+                    uploaded_bytes,
+                    total_bytes,
+                    completed_files,
+                    total_files,
+                    current_path,
+                )
+
+            result = upload_files_concurrently(
+                self.client,
+                self.base_url,
+                self.items,
+                self.max_workers,
+                cancel_check=self.is_cancelled,
+                on_progress=emit_progress,
+            )
+            self.finished.emit(
+                {
+                    "base_url": self.base_url,
+                    "target_dir": self.target_dir,
+                    "total_files": result.total_files,
+                    "uploaded_files": result.uploaded_files,
+                    "uploaded_bytes": result.uploaded_bytes,
+                    "total_bytes": result.total_bytes,
+                    "failures": [
+                        {
+                            "local_path": failure.item.local_path,
+                            "remote_path": failure.item.remote_path,
+                            "error": failure.error,
+                        }
+                        for failure in result.failures
+                    ],
+                }
+            )
+        except OperationCancelled:
+            self.cancelled.emit()
+        except Exception as error:
+            self.error.emit(format_worker_error("上传失败", error))
 
 
 class DirectoryLoadWorker(CancellableWorker):

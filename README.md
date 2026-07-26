@@ -2,7 +2,17 @@
 
 用于浏览 SeaweedFS Filer 中的文件与目录。
 
-当前版本：`1.0.6`
+当前版本：`1.0.7`
+
+## Windows 下载
+
+普通用户请从 [Releases](https://github.com/cossoledad/RESTFulSeaweedFSBrowser/releases)
+下载名称类似下面的独立运行包：
+
+`SeaweedFSBrowser-v<版本>-windows-x64-standalone.zip`
+
+仓库首页的 `Code -> Download ZIP` 和 Release 中自动生成的 `Source code`
+仅包含源代码，不包含 Python、PySide6 或 F3D 运行环境。
 
 ## 功能
 
@@ -57,3 +67,11 @@ onefile：
 ```powershell
 .\build.ps1 -Mode onefile
 ```
+
+构建脚本会强制检查 F3D Python 扩展、DLL 和资源目录，并在生成发布包后运行：
+
+```powershell
+SeaweedFSBrowser.exe --check-f3d-runtime
+```
+
+只有 F3D 导入和打包程序预览启动参数均通过自检时，构建才会成功。

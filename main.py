@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -75,9 +75,18 @@ def get_config_path() -> str:
     return os.path.join(config_dir, "config.json")
 
 
+def is_bundled_app() -> bool:
+    """Return whether the application is running from a packaged executable."""
+    return bool(getattr(sys, "frozen", False) or "__compiled__" in globals())
+
+
 def get_base_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
+    # __file__ points at the standalone directory for Nuitka and at the
+    # extraction directory for onefile builds. Keep sys._MEIPASS compatibility
+    # for other packagers without relying on sys.frozen for Nuitka.
+    pyinstaller_base_dir = getattr(sys, "_MEIPASS", "")
+    if pyinstaller_base_dir:
+        return os.path.abspath(pyinstaller_base_dir)
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -157,7 +166,7 @@ def open_path_in_file_explorer(path: str) -> None:
 
 
 def get_preview_runtime_args() -> List[str]:
-    if getattr(sys, "frozen", False):
+    if is_bundled_app():
         return [sys.executable]
     return [sys.executable, os.path.abspath(__file__)]
 
@@ -174,7 +183,7 @@ def get_windows_icon_path() -> str:
 
 
 def ensure_f3d_runtime_layout() -> None:
-    if not getattr(sys, "frozen", False):
+    if not is_bundled_app():
         return
     base_dir = get_base_dir()
     f3d_bin_dir = os.path.join(base_dir, "f3d", "bin")
@@ -205,7 +214,7 @@ def load_windows_app_icon_handle() -> int:
     IMAGE_ICON = 1
     LR_LOADFROMFILE = 0x0010
 
-    if getattr(sys, "frozen", False):
+    if is_bundled_app():
         small_icon = ctypes.c_void_p()
         large_icon = ctypes.c_void_p()
         extracted = shell32.ExtractIconExW(sys.executable, 0, ctypes.byref(large_icon), ctypes.byref(small_icon), 1)
@@ -548,6 +557,26 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
+
+
+def check_f3d_runtime() -> int:
+    """Validate the packaged F3D binding without opening a render window."""
+    if is_bundled_app() and get_preview_runtime_args() != [sys.executable]:
+        print("F3D 自检失败: 打包程序的预览子进程启动参数不正确", file=sys.stderr)
+        return 1
+
+    try:
+        import f3d
+    except Exception as e:
+        print(f"F3D 自检失败: 无法导入 f3d: {e}", file=sys.stderr)
+        return 1
+
+    if not hasattr(f3d, "Engine"):
+        print("F3D 自检失败: f3d.Engine 不存在", file=sys.stderr)
+        return 1
+
+    print(f"F3D 自检通过: {getattr(f3d, '__version__', 'unknown')}")
+    return 0
 
 
 class SeaweedClient:
@@ -1579,6 +1608,9 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--check-f3d-runtime":
+        return check_f3d_runtime()
+
     if len(sys.argv) >= 3 and sys.argv[1] == "--f3d-preview":
         model_path = sys.argv[2]
         cleanup_dir = ""

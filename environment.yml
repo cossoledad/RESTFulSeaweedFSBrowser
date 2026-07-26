@@ -31,4 +31,3 @@ dependencies:
       - pyside6-essentials==6.10.2
       - shiboken6==6.10.2
       - zstandard==0.25.0
-prefix: C:\Users\hp\miniconda3\envs\pyqt6Nuitka

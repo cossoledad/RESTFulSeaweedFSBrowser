@@ -2,7 +2,7 @@
 
 用于浏览 SeaweedFS Filer 中的文件与目录。
 
-当前版本：`1.0.9`
+当前版本：`1.0.10`
 
 ## Windows 下载
 
@@ -30,7 +30,20 @@
 - 文本、图片和模型预览在后台线程下载和准备，加载期间主窗口保持可用
 - 每个预览加载任务提供非模态进度窗口和取消操作
 - 跟踪 F3D 模型预览子进程，避免同一模型重复打开，并在主程序退出时统一清理
+- 目录加载、文件保存、递归保存和预览任务使用统一的后台任务生命周期，支持安全取消和退出回收
+- 单文件保存采用后台下载和临时文件原子替换，失败或取消不会覆盖已有文件
+- 对远端文件路径进行 URL 编码，对递归保存目标进行路径越界保护
 - 目录缓存：已进入过的目录优先使用缓存，点击“刷新当前目录”或按 `F5` 才重新加载
+
+## 项目结构
+
+- `main.py`：应用入口、主窗口和 F3D 子进程入口
+- `seaweed_browser/core.py`：版本、配置、路径和格式化规则
+- `seaweed_browser/client.py`：SeaweedFS HTTP 访问与原子下载
+- `seaweed_browser/tasks.py`：统一任务管理器及后台 Worker
+- `seaweed_browser/model_files.py`：GLB/GLTF 格式及外部资源解析
+- `seaweed_browser/widgets.py`：文本、图片和详细信息预览控件
+- `tests/`：不依赖图形环境的核心单元测试
 
 ## 发布说明
 
@@ -80,3 +93,6 @@ SeaweedFSBrowser.exe --check-f3d-runtime
 ```
 
 只有 F3D 导入和打包程序预览启动参数均通过自检时，构建才会成功。
+
+GitHub Actions 在 PR 和 `master` push 时只执行检查与构建；仅推送与
+`APP_VERSION` 一致的 `v*` tag 时才创建 GitHub Release。

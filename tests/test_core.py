@@ -1,0 +1,71 @@
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from seaweed_browser.core import (
+    AppConfig,
+    get_config_path,
+    join_url,
+    load_config,
+    safe_local_path,
+    save_config,
+)
+
+
+class CoreTests(unittest.TestCase):
+    def test_join_url_encodes_remote_path(self) -> None:
+        self.assertEqual(
+            join_url("http://localhost:8888/", "/bucket/中文 文件#1?.txt"),
+            "http://localhost:8888/bucket/%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6%231%3F.txt",
+        )
+        self.assertEqual(
+            join_url("http://localhost:8888", "/bucket/100%完成.txt"),
+            "http://localhost:8888/bucket/100%25%E5%AE%8C%E6%88%90.txt",
+        )
+
+    def test_safe_local_path_accepts_child(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            target = safe_local_path(root, "nested/file.bin")
+            self.assertEqual(target, os.path.join(root, "nested", "file.bin"))
+
+    def test_safe_local_path_rejects_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            for relative_path in ("../escape.bin", "nested/../../escape.bin", "/absolute.bin"):
+                with self.subTest(relative_path=relative_path):
+                    with self.assertRaises(ValueError):
+                        safe_local_path(root, relative_path)
+
+    def test_safe_local_path_rejects_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "root")
+            outside = os.path.join(parent, "outside")
+            os.makedirs(root)
+            os.makedirs(outside)
+            link = os.path.join(root, "link")
+            try:
+                os.symlink(outside, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("当前平台不允许创建测试符号链接")
+            with self.assertRaises(ValueError):
+                safe_local_path(root, "link/escape.bin")
+
+    def test_config_round_trip_uses_current_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as appdata:
+            with patch.dict(os.environ, {"APPDATA": appdata}):
+                config = AppConfig(
+                    base_url="http://localhost:8888",
+                    root_dir="/buckets/test/",
+                    page_limit=250,
+                    base_url_history=["http://localhost:8888"],
+                )
+                save_config(config)
+                self.assertTrue(os.path.exists(get_config_path()))
+                loaded = load_config()
+                self.assertEqual(loaded.base_url, config.base_url)
+                self.assertEqual(loaded.root_dir, config.root_dir)
+                self.assertEqual(loaded.page_limit, 250)
+
+
+if __name__ == "__main__":
+    unittest.main()

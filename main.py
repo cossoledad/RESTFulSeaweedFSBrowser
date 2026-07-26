@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -705,7 +705,7 @@ class PreviewDialog(QDialog):
         close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
         self.save_btn.setEnabled(on_save_as is not None)
         self.save_btn.clicked.connect(self.handle_save_as)
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.close)
 
         layout = QVBoxLayout()
         layout.addWidget(text)
@@ -848,7 +848,7 @@ class ImagePreviewDialog(QDialog):
         self.save_btn.setEnabled(on_save_as is not None)
         self.save_btn.clicked.connect(self.handle_save_as)
         self.reset_btn.clicked.connect(self.handle_reset_zoom)
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.close)
 
         layout = QVBoxLayout()
         layout.addWidget(self.info_label)
@@ -890,7 +890,7 @@ class EntryDetailDialog(QDialog):
         copy_btn = buttons.addButton("复制全部", QDialogButtonBox.ButtonRole.ActionRole)
         close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text.toPlainText()))
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.close)
 
         layout = QVBoxLayout()
         layout.addWidget(text)
@@ -1006,6 +1006,7 @@ class MainWindow(QMainWindow):
         self._save_thread: Optional[QThread] = None
         self._save_worker: Optional[SaveDirectoryWorker] = None
         self._save_dialog: Optional[QProgressDialog] = None
+        self._preview_windows: Dict[str, QWidget] = {}
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -1346,10 +1347,46 @@ class MainWindow(QMainWindow):
         if not isinstance(entry, dict):
             return
         full_path = str(entry.get("FullPath", item.text(0)))
+        preview_key = self.build_preview_window_key("details", full_path)
+        if self.activate_preview_window(preview_key):
+            return
         details_json = json.dumps(entry, ensure_ascii=False, indent=2)
         details_text = f"FullPath: {full_path}\n\n{details_json}"
         dlg = EntryDetailDialog(f"详细信息: {full_path}", details_text, self)
-        dlg.exec()
+        self.show_preview_window(preview_key, dlg)
+
+    def build_preview_window_key(self, preview_type: str, full_path: str) -> str:
+        return f"{preview_type}:{self.get_base_url()}:{full_path}"
+
+    def activate_preview_window(self, preview_key: str) -> bool:
+        window = self._preview_windows.get(preview_key)
+        if window is None:
+            return False
+        if window.isMinimized():
+            window.showNormal()
+        else:
+            window.show()
+        window.raise_()
+        window.activateWindow()
+        return True
+
+    def show_preview_window(
+        self,
+        preview_key: str,
+        window: QWidget,
+        on_destroyed: Optional[Callable[[], None]] = None,
+    ) -> None:
+        window.setWindowModality(Qt.WindowModality.NonModal)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def handle_destroyed(*_: Any) -> None:
+            self._preview_windows.pop(preview_key, None)
+            if on_destroyed is not None:
+                on_destroyed()
+
+        window.destroyed.connect(handle_destroyed)
+        self._preview_windows[preview_key] = window
+        window.show()
 
     def go_up_directory(self) -> None:
         root_dir = self.get_root_dir().rstrip("/")
@@ -1371,6 +1408,9 @@ class MainWindow(QMainWindow):
             return
         if self.try_open_image_preview(full_path):
             return
+        preview_key = self.build_preview_window_key("text", full_path)
+        if self.activate_preview_window(preview_key):
+            return
         try:
             base_url = self.get_base_url()
             text = self.client.preview_file(base_url, full_path)
@@ -1380,7 +1420,7 @@ class MainWindow(QMainWindow):
                 on_save_as=lambda: self.save_single_file_to_local(full_path),
                 parent=self,
             )
-            dlg.exec()
+            self.show_preview_window(preview_key, dlg)
         except urllib.error.HTTPError as e:
             QMessageBox.critical(self, "预览失败", f"{e.code} {e.reason}")
         except urllib.error.URLError as e:
@@ -1393,8 +1433,12 @@ class MainWindow(QMainWindow):
     def try_open_image_preview(self, full_path: str) -> bool:
         if get_path_extension(full_path) not in SUPPORTED_IMAGE_EXTENSIONS:
             return False
+        preview_key = self.build_preview_window_key("image", full_path)
+        if self.activate_preview_window(preview_key):
+            return True
         temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
         local_image_path = os.path.join(temp_dir, basename(full_path))
+        cleanup_on_return = True
         try:
             self.client.download_file_to_local(self.get_base_url(), full_path, local_image_path)
             dlg = ImagePreviewDialog(
@@ -1403,7 +1447,12 @@ class MainWindow(QMainWindow):
                 on_save_as=lambda: self.save_single_file_to_local(full_path),
                 parent=self,
             )
-            dlg.exec()
+            self.show_preview_window(
+                preview_key,
+                dlg,
+                on_destroyed=lambda: shutil.rmtree(temp_dir, ignore_errors=True),
+            )
+            cleanup_on_return = False
         except urllib.error.HTTPError as e:
             QMessageBox.critical(self, "图片预览失败", f"{e.code} {e.reason}")
         except urllib.error.URLError as e:
@@ -1411,7 +1460,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "图片预览失败", str(e))
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            if cleanup_on_return:
+                shutil.rmtree(temp_dir, ignore_errors=True)
         return True
 
     def try_open_model_preview(self, full_path: str) -> bool:

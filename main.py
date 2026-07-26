@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 # 减少 Windows 下字体探测产生的大量告警输出。
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
-from PySide6.QtCore import QObject, QPoint, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -449,18 +449,31 @@ def http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str
     return json.loads(raw.decode("utf-8"))
 
 
-def http_get_bytes(url: str) -> bytes:
+def http_get_bytes(
+    url: str,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> bytes:
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read(PREVIEW_MAX_BYTES)
+        chunks: List[bytes] = []
+        remaining = PREVIEW_MAX_BYTES
+        while remaining > 0:
+            if cancel_check is not None and cancel_check():
+                raise RuntimeError("下载已取消")
+            chunk = resp.read(min(DOWNLOAD_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
 
-def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> None:
+def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
     args = get_preview_runtime_args() + ["--f3d-preview", model_path, "--cleanup-dir", cleanup_dir]
     popen_kwargs: Dict[str, Any] = {}
     if sys.platform.startswith("win"):
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen(args, **popen_kwargs)
+    return subprocess.Popen(args, **popen_kwargs)
 
 
 def apply_windows_window_icon_later() -> None:
@@ -624,9 +637,14 @@ class SeaweedClient:
                 break
         return all_entries
 
-    def preview_file(self, base_url: str, full_path: str) -> str:
+    def preview_file(
+        self,
+        base_url: str,
+        full_path: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
         url = join_url(base_url, full_path)
-        data = http_get_bytes(url)
+        data = http_get_bytes(url, cancel_check=cancel_check)
         return data.decode("utf-8", errors="replace")
 
     def download_file_to_local(
@@ -679,6 +697,145 @@ class DirectoryLoadWorker(QObject):
             self.error.emit(f"网络错误: {e.reason}")
         except Exception as e:
             self.error.emit(f"加载异常: {e}")
+
+
+class PreviewLoadWorker(QObject):
+    finished = Signal(dict)
+    cancelled = Signal()
+    error = Signal(str)
+
+    def __init__(
+        self,
+        client: SeaweedClient,
+        preview_type: str,
+        base_url: str,
+        full_path: str,
+    ):
+        super().__init__()
+        self.client = client
+        self.preview_type = preview_type
+        self.base_url = base_url
+        self.full_path = full_path
+        self._cancelled = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancelled.set()
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def ensure_not_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise RuntimeError("下载已取消")
+
+    def run(self) -> None:
+        owned_temp_dir = ""
+        try:
+            self.ensure_not_cancelled()
+            result: Dict[str, Any] = {
+                "preview_type": self.preview_type,
+                "base_url": self.base_url,
+                "full_path": self.full_path,
+            }
+            if self.preview_type == "text":
+                result["content"] = self.client.preview_file(
+                    self.base_url,
+                    self.full_path,
+                    cancel_check=self.is_cancelled,
+                )
+            elif self.preview_type == "image":
+                owned_temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
+                local_path = os.path.join(owned_temp_dir, basename(self.full_path))
+                self.client.download_file_to_local(
+                    self.base_url,
+                    self.full_path,
+                    local_path,
+                    cancel_check=self.is_cancelled,
+                )
+                result["temp_dir"] = owned_temp_dir
+                result["local_path"] = local_path
+            elif self.preview_type == "model":
+                owned_temp_dir = tempfile.mkdtemp(
+                    prefix=f"{APP_NAME}-{get_path_extension(self.full_path).lstrip('.') or 'model'}-"
+                )
+                local_path = self.prepare_model(owned_temp_dir)
+                result["temp_dir"] = owned_temp_dir
+                result["local_path"] = local_path
+            else:
+                raise RuntimeError(f"不支持的预览类型: {self.preview_type}")
+
+            self.ensure_not_cancelled()
+            self.finished.emit(result)
+            owned_temp_dir = ""
+        except urllib.error.HTTPError as e:
+            self.error.emit(f"HTTP 错误: {e.code} {e.reason}")
+        except urllib.error.URLError as e:
+            self.error.emit(f"网络错误: {e.reason}")
+        except RuntimeError as e:
+            if self.is_cancelled() or "取消" in str(e):
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"预览准备失败: {e}")
+        finally:
+            if owned_temp_dir:
+                shutil.rmtree(owned_temp_dir, ignore_errors=True)
+
+    def prepare_model(self, temp_dir: str) -> str:
+        original_local_path = os.path.join(temp_dir, basename(self.full_path))
+        self.client.download_file_to_local(
+            self.base_url,
+            self.full_path,
+            original_local_path,
+            cancel_check=self.is_cancelled,
+        )
+        self.ensure_not_cancelled()
+
+        detected_format = sniff_model_format(original_local_path)
+        local_model_path = original_local_path
+        if detected_format == "glb" and get_path_extension(original_local_path) != ".glb":
+            local_model_path = replace_extension(original_local_path, ".glb")
+            os.replace(original_local_path, local_model_path)
+        elif detected_format == "gltf":
+            if get_path_extension(original_local_path) != ".gltf":
+                local_model_path = replace_extension(original_local_path, ".gltf")
+                os.replace(original_local_path, local_model_path)
+            self.download_gltf_sidecar_resources(temp_dir, local_model_path)
+        return local_model_path
+
+    def download_gltf_sidecar_resources(self, temp_dir: str, local_model_path: str) -> None:
+        remote_dir = posixpath.dirname(normalize_dir_path(self.full_path))
+        resolved_temp_dir = os.path.abspath(temp_dir)
+        for resource_path in collect_gltf_resource_paths(local_model_path):
+            self.ensure_not_cancelled()
+            remote_resource_path = normalize_dir_path(posixpath.join(remote_dir, resource_path))
+            local_resource_path = os.path.join(temp_dir, *resource_path.split("/"))
+            resolved_local_path = os.path.abspath(local_resource_path)
+            if (
+                not resolved_local_path.startswith(resolved_temp_dir + os.sep)
+                and resolved_local_path != resolved_temp_dir
+            ):
+                raise RuntimeError(f"资源路径越界，已拒绝下载: {resource_path}")
+            self.client.download_file_to_local(
+                self.base_url,
+                remote_resource_path,
+                resolved_local_path,
+                cancel_check=self.is_cancelled,
+            )
+
+
+@dataclass
+class PreviewLoadTask:
+    thread: QThread
+    worker: PreviewLoadWorker
+    dialog: QProgressDialog
+
+
+@dataclass
+class ModelPreviewProcess:
+    process: subprocess.Popen
+    temp_dir: str
 
 
 class PreviewDialog(QDialog):
@@ -1007,6 +1164,13 @@ class MainWindow(QMainWindow):
         self._save_worker: Optional[SaveDirectoryWorker] = None
         self._save_dialog: Optional[QProgressDialog] = None
         self._preview_windows: Dict[str, QWidget] = {}
+        self._preview_load_tasks: Dict[str, PreviewLoadTask] = {}
+        self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
+        self._closing_after_preview_cancel = False
+        self._model_process_timer = QTimer(self)
+        self._model_process_timer.setInterval(1000)
+        self._model_process_timer.timeout.connect(self.reap_model_preview_processes)
+        self._model_process_timer.start()
 
         root = QWidget(self)
         self.setCentralWidget(root)
@@ -1404,122 +1568,198 @@ class MainWindow(QMainWindow):
         self.load_directory(self.current_dir, force_reload=False)
 
     def open_preview(self, full_path: str) -> None:
-        if self.try_open_model_preview(full_path):
-            return
-        if self.try_open_image_preview(full_path):
-            return
-        preview_key = self.build_preview_window_key("text", full_path)
+        extension = get_path_extension(full_path)
+        if extension in SUPPORTED_F3D_MODEL_EXTENSIONS:
+            preview_type = "model"
+        elif extension in SUPPORTED_IMAGE_EXTENSIONS:
+            preview_type = "image"
+        else:
+            preview_type = "text"
+
+        preview_key = self.build_preview_window_key(preview_type, full_path)
         if self.activate_preview_window(preview_key):
             return
-        try:
-            base_url = self.get_base_url()
-            text = self.client.preview_file(base_url, full_path)
-            dlg = PreviewDialog(
-                f"预览: {full_path}",
-                text,
-                on_save_as=lambda: self.save_single_file_to_local(full_path),
-                parent=self,
-            )
-            self.show_preview_window(preview_key, dlg)
-        except urllib.error.HTTPError as e:
-            QMessageBox.critical(self, "预览失败", f"{e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            QMessageBox.critical(self, "预览失败", str(e.reason))
-        except UnicodeDecodeError:
-            QMessageBox.warning(self, "预览失败", "该文件不是文本，或编码不支持。")
-        except Exception as e:
-            QMessageBox.critical(self, "预览失败", str(e))
-
-    def try_open_image_preview(self, full_path: str) -> bool:
-        if get_path_extension(full_path) not in SUPPORTED_IMAGE_EXTENSIONS:
-            return False
-        preview_key = self.build_preview_window_key("image", full_path)
-        if self.activate_preview_window(preview_key):
-            return True
-        temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
-        local_image_path = os.path.join(temp_dir, basename(full_path))
-        cleanup_on_return = True
-        try:
-            self.client.download_file_to_local(self.get_base_url(), full_path, local_image_path)
-            dlg = ImagePreviewDialog(
-                f"图片预览: {full_path}",
-                local_image_path,
-                on_save_as=lambda: self.save_single_file_to_local(full_path),
-                parent=self,
-            )
-            self.show_preview_window(
-                preview_key,
-                dlg,
-                on_destroyed=lambda: shutil.rmtree(temp_dir, ignore_errors=True),
-            )
-            cleanup_on_return = False
-        except urllib.error.HTTPError as e:
-            QMessageBox.critical(self, "图片预览失败", f"{e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            QMessageBox.critical(self, "图片预览失败", str(e.reason))
-        except Exception as e:
-            QMessageBox.critical(self, "图片预览失败", str(e))
-        finally:
-            if cleanup_on_return:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-        return True
-
-    def try_open_model_preview(self, full_path: str) -> bool:
-        if get_path_extension(full_path) not in SUPPORTED_F3D_MODEL_EXTENSIONS:
-            return False
-        try:
-            self.open_model_preview(full_path)
-            return True
-        except urllib.error.HTTPError as e:
-            QMessageBox.critical(self, "模型预览失败", f"{e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            QMessageBox.critical(self, "模型预览失败", str(e.reason))
-        except Exception as e:
-            QMessageBox.critical(self, "模型预览失败", str(e))
-        return True
-
-    def open_model_preview(self, full_path: str) -> None:
-        try:
-            import f3d  # noqa: F401
-        except ImportError as e:
-            raise RuntimeError("当前环境未安装 f3d，请先执行: pip install f3d") from e
-
-        ext = get_path_extension(full_path).lstrip(".") or "model"
-        temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-{ext}-")
-        original_local_path = os.path.join(temp_dir, basename(full_path))
         base_url = self.get_base_url()
-        self.client.download_file_to_local(base_url, full_path, original_local_path)
+        if not base_url:
+            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            return
+        if preview_type == "model" and self.activate_model_preview_process(preview_key):
+            return
+        if preview_key in self._preview_load_tasks:
+            task = self._preview_load_tasks[preview_key]
+            task.dialog.show()
+            task.dialog.raise_()
+            task.dialog.activateWindow()
+            return
+        if preview_type == "model":
+            try:
+                import f3d  # noqa: F401
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "模型预览失败",
+                    f"F3D 运行环境不可用，请检查安装或打包内容。\n\n{e}",
+                )
+                return
+        self.start_preview_load(preview_key, preview_type, base_url, full_path)
 
-        detected_format = sniff_model_format(original_local_path)
-        local_model_path = original_local_path
-        if detected_format == "glb" and get_path_extension(original_local_path) != ".glb":
-            local_model_path = replace_extension(original_local_path, ".glb")
-            os.replace(original_local_path, local_model_path)
-        elif detected_format == "gltf":
-            if get_path_extension(original_local_path) != ".gltf":
-                local_model_path = replace_extension(original_local_path, ".gltf")
-                os.replace(original_local_path, local_model_path)
-            self.download_gltf_sidecar_resources(base_url, full_path, temp_dir, local_model_path)
-
-        launch_f3d_preview_subprocess(local_model_path, temp_dir)
-        self.statusBar().showMessage(f"已打开模型预览: {basename(full_path)}")
-
-    def download_gltf_sidecar_resources(
+    def start_preview_load(
         self,
+        preview_key: str,
+        preview_type: str,
         base_url: str,
-        remote_model_path: str,
-        temp_dir: str,
-        local_model_path: str,
+        full_path: str,
     ) -> None:
-        remote_dir = posixpath.dirname(normalize_dir_path(remote_model_path))
-        for resource_path in collect_gltf_resource_paths(local_model_path):
-            remote_resource_path = normalize_dir_path(posixpath.join(remote_dir, resource_path))
-            local_resource_path = os.path.join(temp_dir, *resource_path.split("/"))
-            resolved_local_path = os.path.abspath(local_resource_path)
-            resolved_temp_dir = os.path.abspath(temp_dir)
-            if not resolved_local_path.startswith(resolved_temp_dir + os.sep) and resolved_local_path != resolved_temp_dir:
-                raise RuntimeError(f"资源路径越界，已拒绝下载: {resource_path}")
-            self.client.download_file_to_local(base_url, remote_resource_path, resolved_local_path)
+        type_labels = {"text": "文本", "image": "图片", "model": "模型"}
+        label = type_labels.get(preview_type, "文件")
+        dialog = QProgressDialog(f"正在准备{label}预览...\n{full_path}", "取消", 0, 0, self)
+        dialog.setWindowTitle(f"{label}预览加载中")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.show()
+
+        thread = QThread(self)
+        worker = PreviewLoadWorker(self.client, preview_type, base_url, full_path)
+        worker.moveToThread(thread)
+        task = PreviewLoadTask(thread=thread, worker=worker, dialog=dialog)
+        self._preview_load_tasks[preview_key] = task
+
+        thread.started.connect(worker.run)
+        dialog.canceled.connect(lambda target=worker: target.request_cancel())
+        dialog.canceled.connect(
+            lambda key=preview_key: self.on_preview_cancel_requested(key)
+        )
+        worker.finished.connect(
+            lambda result, key=preview_key: self.on_preview_load_finished(key, result)
+        )
+        worker.cancelled.connect(
+            lambda key=preview_key: self.on_preview_load_cancelled(key)
+        )
+        worker.error.connect(
+            lambda message, key=preview_key: self.on_preview_load_failed(key, message)
+        )
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda key=preview_key: self.on_preview_load_thread_cleaned(key)
+        )
+        thread.start()
+        self.statusBar().showMessage(f"正在准备{label}预览: {basename(full_path)}")
+
+    def on_preview_cancel_requested(self, preview_key: str) -> None:
+        task = self._preview_load_tasks.get(preview_key)
+        if task is not None:
+            task.dialog.setLabelText("正在取消预览加载，请稍候...")
+
+    def on_preview_load_finished(self, preview_key: str, result: Dict[str, Any]) -> None:
+        preview_type = str(result.get("preview_type", ""))
+        full_path = str(result.get("full_path", ""))
+        temp_dir = str(result.get("temp_dir", ""))
+        local_path = str(result.get("local_path", ""))
+        task = self._preview_load_tasks.get(preview_key)
+        if task is not None and (task.dialog.wasCanceled() or task.worker.is_cancelled()):
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return
+        if self._closing_after_preview_cancel:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return
+        try:
+            if preview_type == "text":
+                dlg = PreviewDialog(
+                    f"预览: {full_path}",
+                    str(result.get("content", "")),
+                    on_save_as=lambda path=full_path: self.save_single_file_to_local(path),
+                    parent=self,
+                )
+                self.show_preview_window(preview_key, dlg)
+            elif preview_type == "image":
+                dlg = ImagePreviewDialog(
+                    f"图片预览: {full_path}",
+                    local_path,
+                    on_save_as=lambda path=full_path: self.save_single_file_to_local(path),
+                    parent=self,
+                )
+                self.show_preview_window(
+                    preview_key,
+                    dlg,
+                    on_destroyed=lambda path=temp_dir: shutil.rmtree(path, ignore_errors=True),
+                )
+                temp_dir = ""
+            elif preview_type == "model":
+                process = launch_f3d_preview_subprocess(local_path, temp_dir)
+                self._model_preview_processes[preview_key] = ModelPreviewProcess(
+                    process=process,
+                    temp_dir=temp_dir,
+                )
+                temp_dir = ""
+            else:
+                raise RuntimeError(f"不支持的预览类型: {preview_type}")
+            self.statusBar().showMessage(f"已打开预览: {basename(full_path)}")
+        except Exception as e:
+            if not self._closing_after_preview_cancel:
+                QMessageBox.critical(self, "预览失败", str(e))
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def on_preview_load_cancelled(self, preview_key: str) -> None:
+        if not self._closing_after_preview_cancel:
+            self.statusBar().showMessage("预览加载已取消")
+
+    def on_preview_load_failed(self, preview_key: str, message: str) -> None:
+        if not self._closing_after_preview_cancel:
+            QMessageBox.critical(self, "预览失败", message)
+            self.statusBar().showMessage("预览加载失败")
+
+    def on_preview_load_thread_cleaned(self, preview_key: str) -> None:
+        task = self._preview_load_tasks.pop(preview_key, None)
+        if task is not None:
+            task.dialog.close()
+            task.dialog.deleteLater()
+        if self._closing_after_preview_cancel and not self._preview_load_tasks:
+            QTimer.singleShot(0, self.close)
+
+    def activate_model_preview_process(self, preview_key: str) -> bool:
+        record = self._model_preview_processes.get(preview_key)
+        if record is None:
+            return False
+        if record.process.poll() is None:
+            self.statusBar().showMessage("该模型预览窗口已经打开")
+            return True
+        self._model_preview_processes.pop(preview_key, None)
+        shutil.rmtree(record.temp_dir, ignore_errors=True)
+        return False
+
+    def reap_model_preview_processes(self) -> None:
+        for preview_key, record in list(self._model_preview_processes.items()):
+            if record.process.poll() is None:
+                continue
+            self._model_preview_processes.pop(preview_key, None)
+            shutil.rmtree(record.temp_dir, ignore_errors=True)
+
+    def terminate_model_preview_processes(self) -> None:
+        for record in list(self._model_preview_processes.values()):
+            if record.process.poll() is None:
+                try:
+                    record.process.terminate()
+                    record.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    record.process.kill()
+                    try:
+                        record.process.wait(timeout=2)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            shutil.rmtree(record.temp_dir, ignore_errors=True)
+        self._model_preview_processes.clear()
 
     def save_single_file_to_local(self, full_path: str) -> None:
         default_name = basename(full_path)
@@ -1655,6 +1895,25 @@ class MainWindow(QMainWindow):
             self._save_dialog.deleteLater()
             self._save_dialog = None
         self.set_loading_ui(False)
+
+    def closeEvent(self, event) -> None:
+        for window in list(self._preview_windows.values()):
+            window.close()
+
+        if self._preview_load_tasks:
+            self._closing_after_preview_cancel = True
+            self.setEnabled(False)
+            self.statusBar().showMessage("正在取消预览加载并清理临时资源...")
+            for task in list(self._preview_load_tasks.values()):
+                task.worker.request_cancel()
+                task.dialog.setLabelText("正在取消预览加载，请稍候...")
+                task.dialog.hide()
+            event.ignore()
+            return
+
+        self._model_process_timer.stop()
+        self.terminate_model_preview_processes()
+        super().closeEvent(event)
 
 
 def main() -> int:

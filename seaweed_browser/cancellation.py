@@ -1,6 +1,7 @@
 import threading
 
 from .client import OperationCancelled
+from .i18n import tr
 
 
 class CancellationToken:
@@ -15,4 +16,4 @@ class CancellationToken:
 
     def raise_if_cancelled(self) -> None:
         if self.is_cancelled():
-            raise OperationCancelled("操作已取消")
+            raise OperationCancelled(tr("操作已取消"))

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional
 
 from .client import OperationCancelled, SeaweedClient, ensure_not_cancelled
+from .i18n import tr
 
 
 CancelCheck = Optional[Callable[[], bool]]
@@ -27,7 +28,7 @@ def download_files_concurrently(
     """Download files with a bounded number of workers and in-flight futures."""
 
     if max_workers <= 0:
-        raise ValueError("max_workers 必须大于 0")
+        raise ValueError(tr("max_workers 必须大于 0"))
 
     item_list = list(items)
     total = len(item_list)

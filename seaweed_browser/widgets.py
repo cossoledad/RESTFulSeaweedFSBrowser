@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .i18n import tr
 from .resources import get_app_window_icon
 
 
@@ -49,10 +50,13 @@ class PreviewDialog(QDialog):
 
         buttons = QDialogButtonBox(self)
         self.save_btn = buttons.addButton(
-            "另存为本地文件",
+            tr("另存为本地文件"),
             QDialogButtonBox.ButtonRole.ActionRole,
         )
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        close_btn = buttons.addButton(
+            tr("关闭"),
+            QDialogButtonBox.ButtonRole.RejectRole,
+        )
         self.save_btn.setEnabled(on_save_as is not None)
         self.save_btn.clicked.connect(self.handle_save_as)
         close_btn.clicked.connect(self.close)
@@ -184,7 +188,7 @@ class ImagePreviewDialog(QDialog):
         self._on_save_as = on_save_as
         self._pixmap = QPixmap(image_path)
         if self._pixmap.isNull():
-            raise RuntimeError("无法加载图片")
+            raise RuntimeError(tr("无法加载图片"))
 
         self.info_label = QLabel()
         self.preview_area = ImagePreviewArea(self._pixmap, self)
@@ -192,14 +196,17 @@ class ImagePreviewDialog(QDialog):
 
         buttons = QDialogButtonBox(self)
         self.save_btn = buttons.addButton(
-            "另存为本地文件",
+            tr("另存为本地文件"),
             QDialogButtonBox.ButtonRole.ActionRole,
         )
         self.reset_btn = buttons.addButton(
-            "重置缩放",
+            tr("重置缩放"),
             QDialogButtonBox.ButtonRole.ActionRole,
         )
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        close_btn = buttons.addButton(
+            tr("关闭"),
+            QDialogButtonBox.ButtonRole.RejectRole,
+        )
         self.save_btn.setEnabled(on_save_as is not None)
         self.save_btn.clicked.connect(self.handle_save_as)
         self.reset_btn.clicked.connect(self.handle_reset_zoom)
@@ -224,7 +231,10 @@ class ImagePreviewDialog(QDialog):
         zoom_percent = int(round(self.preview_area.scale_factor * 100))
         self.info_label.setText(
             f"{self._pixmap.width()} x {self._pixmap.height()} px | "
-            f"缩放 {zoom_percent}% | 滚轮缩放，左键拖拽，双击重置"
+            + tr(
+                "缩放 {percent}% | 滚轮缩放，左键拖拽，双击重置",
+                percent=zoom_percent,
+            )
         )
 
     def on_zoom_changed(self, _: float) -> None:
@@ -243,8 +253,14 @@ class EntryDetailDialog(QDialog):
         text.setPlainText(details_text)
 
         buttons = QDialogButtonBox(self)
-        copy_btn = buttons.addButton("复制全部", QDialogButtonBox.ButtonRole.ActionRole)
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        copy_btn = buttons.addButton(
+            tr("复制全部"),
+            QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        close_btn = buttons.addButton(
+            tr("关闭"),
+            QDialogButtonBox.ButtonRole.RejectRole,
+        )
         copy_btn.clicked.connect(
             lambda: QApplication.clipboard().setText(text.toPlainText())
         )

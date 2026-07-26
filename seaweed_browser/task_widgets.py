@@ -11,8 +11,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .i18n import tr
 from .task_models import TaskSnapshot, TaskState
-from .task_presenter import STATE_TEXT, format_progress
+from .task_presenter import format_progress, format_task_state
 from .task_runtime import TaskManager
 
 
@@ -22,7 +23,7 @@ class TaskCenterDock(QDockWidget):
         manager: TaskManager,
         parent: Optional[QWidget] = None,
     ):
-        super().__init__("任务中心", parent)
+        super().__init__(tr("任务中心"), parent)
         self.manager = manager
         self.setObjectName("TaskCenterDock")
         self.setAllowedAreas(
@@ -34,14 +35,16 @@ class TaskCenterDock(QDockWidget):
         layout = QVBoxLayout(root)
         toolbar = QHBoxLayout()
         toolbar.addStretch(1)
-        clear_button = QPushButton("清除已完成")
-        clear_button.clicked.connect(manager.clear_completed)
-        toolbar.addWidget(clear_button)
+        self.clear_button = QPushButton(tr("清除已完成"))
+        self.clear_button.clicked.connect(manager.clear_completed)
+        toolbar.addWidget(self.clear_button)
         layout.addLayout(toolbar)
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(5)
-        self.tree.setHeaderLabels(["任务", "状态", "进度", "详情", "操作"])
+        self.tree.setHeaderLabels(
+            [tr("任务"), tr("状态"), tr("进度"), tr("详情"), tr("操作")]
+        )
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
         self.tree.setColumnWidth(0, 210)
@@ -59,6 +62,14 @@ class TaskCenterDock(QDockWidget):
     def show_and_raise(self) -> None:
         self.show()
         self.raise_()
+
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(tr("任务中心"))
+        self.clear_button.setText(tr("清除已完成"))
+        self.tree.setHeaderLabels(
+            [tr("任务"), tr("状态"), tr("进度"), tr("详情"), tr("操作")]
+        )
+        self.rebuild()
 
     def rebuild(self) -> None:
         self.tree.clear()
@@ -79,7 +90,7 @@ class TaskCenterDock(QDockWidget):
         item = QTreeWidgetItem(
             [
                 snapshot.spec.title,
-                STATE_TEXT[snapshot.state],
+                format_task_state(snapshot.state),
                 format_progress(snapshot.progress),
                 detail,
                 "",
@@ -95,7 +106,7 @@ class TaskCenterDock(QDockWidget):
             and snapshot.spec.cancellable
             and snapshot.state != TaskState.CANCELLING
         ):
-            cancel_button = QPushButton("取消")
+            cancel_button = QPushButton(tr("取消"))
             cancel_button.clicked.connect(
                 lambda _checked=False, task_id=snapshot.task_id: self.manager.cancel(
                     task_id

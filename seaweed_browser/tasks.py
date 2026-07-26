@@ -23,6 +23,7 @@ from .core import (
     safe_local_path,
 )
 from .downloads import DownloadItem, download_files_concurrently
+from .i18n import tr
 from .model_files import collect_gltf_resource_paths, sniff_model_format
 from .task_models import ProgressUnit, TaskError, TaskProgress
 from .uploads import UploadItem, upload_files_concurrently
@@ -48,18 +49,18 @@ class CancellableWorker(QObject):
 def format_worker_error(prefix: str, error: Exception) -> str:
     if isinstance(error, SeaweedHttpError):
         messages = {
-            403: "服务器拒绝写入，可能没有权限或受到 WORM 策略限制",
-            409: "目标名称与现有文件或目录冲突",
-            413: "服务器拒绝了文件大小",
+            403: tr("服务器拒绝写入，可能没有权限或受到 WORM 策略限制"),
+            409: tr("目标名称与现有文件或目录冲突"),
+            413: tr("服务器拒绝了文件大小"),
         }
         description = messages.get(error.status, str(error))
         if error.detail and error.detail not in description:
             description = f"{description}\n{error.detail}"
         return description
     if isinstance(error, urllib.error.HTTPError):
-        return f"HTTP 错误: {error.code} {error.reason}"
+        return tr("HTTP 错误: {code} {reason}", code=error.code, reason=error.reason)
     if isinstance(error, urllib.error.URLError):
-        return f"网络错误: {error.reason}"
+        return tr("网络错误: {reason}", reason=error.reason)
     return f"{prefix}: {error}"
 
 
@@ -80,7 +81,7 @@ class CreateDirectoryWorker(CancellableWorker):
     def run(self) -> None:
         try:
             self.progress_changed.emit(
-                TaskProgress.indeterminate("创建文件夹", self.target_path)
+                TaskProgress.indeterminate(tr("创建文件夹"), self.target_path)
             )
             payload = self.client.create_directory(
                 self.base_url,
@@ -99,7 +100,7 @@ class CreateDirectoryWorker(CancellableWorker):
             self.cancelled.emit()
         except Exception as error:
             self.failed.emit(
-                TaskError(format_worker_error("创建目录失败", error))
+                TaskError(format_worker_error(tr("创建目录失败"), error))
             )
 
 
@@ -146,7 +147,7 @@ class UploadBatchWorker(CancellableWorker):
                         uploaded_bytes,
                         total_bytes,
                         ProgressUnit.BYTES,
-                        phase="上传",
+                        phase=tr("上传"),
                         detail=basename(current_path),
                         secondary_current=completed_files,
                         secondary_total=total_files,
@@ -156,7 +157,7 @@ class UploadBatchWorker(CancellableWorker):
                         completed_files,
                         total_files,
                         ProgressUnit.ITEMS,
-                        phase="上传",
+                        phase=tr("上传"),
                         detail=basename(current_path),
                     )
                 self.progress_changed.emit(progress)
@@ -188,7 +189,11 @@ class UploadBatchWorker(CancellableWorker):
             if result.failures:
                 self.failed.emit(
                     TaskError(
-                        f"部分文件上传失败：{len(result.failures)}/{result.total_files}",
+                        tr(
+                            "部分文件上传失败：{failed}/{total}",
+                            failed=len(result.failures),
+                            total=result.total_files,
+                        ),
                         retryable=True,
                         payload=payload,
                     )
@@ -198,7 +203,7 @@ class UploadBatchWorker(CancellableWorker):
         except OperationCancelled:
             self.cancelled.emit()
         except Exception as error:
-            self.failed.emit(TaskError(format_worker_error("上传失败", error)))
+            self.failed.emit(TaskError(format_worker_error(tr("上传失败"), error)))
 
 
 class DirectoryLoadWorker(CancellableWorker):
@@ -214,8 +219,8 @@ class DirectoryLoadWorker(CancellableWorker):
             def emit_progress(count: int) -> None:
                 self.progress_changed.emit(
                     TaskProgress.indeterminate(
-                        "加载目录",
-                        f"已加载 {count} 条",
+                        tr("加载目录"),
+                        tr("已加载 {count} 条", count=count),
                     )
                 )
 
@@ -230,7 +235,7 @@ class DirectoryLoadWorker(CancellableWorker):
         except OperationCancelled:
             self.cancelled.emit()
         except Exception as e:
-            self.failed.emit(TaskError(format_worker_error("加载异常", e)))
+            self.failed.emit(TaskError(format_worker_error(tr("加载异常"), e)))
 
 
 class PreviewLoadWorker(CancellableWorker):
@@ -252,7 +257,10 @@ class PreviewLoadWorker(CancellableWorker):
         try:
             self.token.raise_if_cancelled()
             self.progress_changed.emit(
-                TaskProgress.indeterminate("准备预览", basename(self.full_path))
+                TaskProgress.indeterminate(
+                    tr("准备预览"),
+                    basename(self.full_path),
+                )
             )
             result: Dict[str, Any] = {
                 "preview_type": self.preview_type,
@@ -261,7 +269,10 @@ class PreviewLoadWorker(CancellableWorker):
             }
             if self.preview_type == "text":
                 self.progress_changed.emit(
-                    TaskProgress.indeterminate("下载文本", basename(self.full_path))
+                    TaskProgress.indeterminate(
+                        tr("下载文本"),
+                        basename(self.full_path),
+                    )
                 )
                 result["content"] = self.client.preview_file(
                     self.base_url,
@@ -270,7 +281,10 @@ class PreviewLoadWorker(CancellableWorker):
                 )
             elif self.preview_type == "image":
                 self.progress_changed.emit(
-                    TaskProgress.indeterminate("下载图片", basename(self.full_path))
+                    TaskProgress.indeterminate(
+                        tr("下载图片"),
+                        basename(self.full_path),
+                    )
                 )
                 owned_temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
                 local_path = safe_local_path(owned_temp_dir, basename(self.full_path))
@@ -284,7 +298,10 @@ class PreviewLoadWorker(CancellableWorker):
                 result["local_path"] = local_path
             elif self.preview_type == "model":
                 self.progress_changed.emit(
-                    TaskProgress.indeterminate("准备模型", basename(self.full_path))
+                    TaskProgress.indeterminate(
+                        tr("准备模型"),
+                        basename(self.full_path),
+                    )
                 )
                 extension = get_path_extension(self.full_path).lstrip(".") or "model"
                 owned_temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-{extension}-")
@@ -292,21 +309,25 @@ class PreviewLoadWorker(CancellableWorker):
                 result["temp_dir"] = owned_temp_dir
                 result["local_path"] = local_path
             else:
-                raise RuntimeError(f"不支持的预览类型: {self.preview_type}")
+                raise RuntimeError(
+                    tr("不支持的预览类型: {type}", type=self.preview_type)
+                )
             self.token.raise_if_cancelled()
             self.succeeded.emit(result)
             owned_temp_dir = ""
         except OperationCancelled:
             self.cancelled.emit()
         except Exception as e:
-            self.failed.emit(TaskError(format_worker_error("预览准备失败", e)))
+            self.failed.emit(
+                TaskError(format_worker_error(tr("预览准备失败"), e))
+            )
         finally:
             if owned_temp_dir:
                 shutil.rmtree(owned_temp_dir, ignore_errors=True)
 
     def prepare_model(self, temp_dir: str) -> str:
         self.progress_changed.emit(
-            TaskProgress.indeterminate("下载模型", basename(self.full_path))
+            TaskProgress.indeterminate(tr("下载模型"), basename(self.full_path))
         )
         original_local_path = safe_local_path(temp_dir, basename(self.full_path))
         self.client.download_file_to_local(
@@ -327,7 +348,10 @@ class PreviewLoadWorker(CancellableWorker):
                 local_model_path = replace_extension(original_local_path, ".gltf")
                 os.replace(original_local_path, local_model_path)
             self.progress_changed.emit(
-                TaskProgress.indeterminate("分析 GLTF 资源", basename(self.full_path))
+                TaskProgress.indeterminate(
+                    tr("分析 GLTF 资源"),
+                    basename(self.full_path),
+                )
             )
             self.download_gltf_sidecar_resources(temp_dir, local_model_path)
         return local_model_path
@@ -342,7 +366,7 @@ class PreviewLoadWorker(CancellableWorker):
                     index - 1,
                     len(resource_paths),
                     ProgressUnit.ITEMS,
-                    phase="下载 GLTF 资源",
+                    phase=tr("下载 GLTF 资源"),
                     detail=resource_path,
                 )
             )
@@ -384,7 +408,7 @@ class FileDownloadWorker(CancellableWorker):
                             downloaded,
                             total,
                             ProgressUnit.BYTES,
-                            phase="下载",
+                            phase=tr("下载"),
                             detail=basename(self.full_path),
                         )
                     )
@@ -400,7 +424,7 @@ class FileDownloadWorker(CancellableWorker):
         except OperationCancelled:
             self.cancelled.emit()
         except Exception as e:
-            self.failed.emit(TaskError(format_worker_error("保存失败", e)))
+            self.failed.emit(TaskError(format_worker_error(tr("保存失败"), e)))
 
 
 class SaveDirectoryWorker(CancellableWorker):
@@ -447,7 +471,7 @@ class SaveDirectoryWorker(CancellableWorker):
                         completed,
                         total,
                         ProgressUnit.ITEMS,
-                        phase="下载目录",
+                        phase=tr("下载目录"),
                         detail=basename(current),
                     )
                 ),
@@ -462,7 +486,7 @@ class SaveDirectoryWorker(CancellableWorker):
         except OperationCancelled:
             self.cancelled.emit()
         except Exception as e:
-            self.failed.emit(TaskError(format_worker_error("保存失败", e)))
+            self.failed.emit(TaskError(format_worker_error(tr("保存失败"), e)))
 
     def collect_files(self) -> List[str]:
         queue = deque([self.source_dir])
@@ -493,8 +517,13 @@ class SaveDirectoryWorker(CancellableWorker):
                     files.append(full_path)
             self.progress_changed.emit(
                 TaskProgress.indeterminate(
-                    "扫描目录",
-                    f"已扫描 {scanned_dirs} 个目录，发现 {len(files)} 个文件 · {current}",
+                    tr("扫描目录"),
+                    tr(
+                        "已扫描 {dirs} 个目录，发现 {files} 个文件 · {current}",
+                        dirs=scanned_dirs,
+                        files=len(files),
+                        current=current,
+                    ),
                 )
             )
         return files
@@ -510,4 +539,9 @@ class SaveDirectoryWorker(CancellableWorker):
             return normalized[len(prefix) + 1 :]
         if normalized == prefix:
             return basename(normalized)
-        raise ValueError(f"服务端返回了源目录之外的路径: {full_path}")
+        raise ValueError(
+            tr(
+                "服务端返回了源目录之外的路径: {path}",
+                path=full_path,
+            )
+        )

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction, QFontDatabase
+from PySide6.QtGui import QAction, QActionGroup, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -56,6 +56,12 @@ from seaweed_browser.core import (
     sanitize_positive_int,
     save_config,
     update_history,
+)
+from seaweed_browser.i18n import (
+    LANGUAGE_NAMES,
+    get_language,
+    set_language,
+    tr,
 )
 from seaweed_browser.tasks import (
     CreateDirectoryWorker,
@@ -212,14 +218,14 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
     try:
         import f3d
     except ImportError:
-        print("缺少依赖: f3d。请先执行 pip install f3d", file=sys.stderr)
+        print(tr("缺少依赖: f3d。请先执行 pip install f3d"), file=sys.stderr)
         return 1
 
     try:
         engine = f3d.Engine.create()
         window_width = 960
         window_height = 720
-        engine.window.set_window_name(f"{APP_NAME} - 模型预览")
+        engine.window.set_window_name(f"{APP_NAME} - {tr('模型预览')}")
         try:
             engine.window.size = (window_width, window_height)
         except Exception:
@@ -240,7 +246,9 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
         try:
             engine.scene.add(model_path)
         except RuntimeError as e:
-            raise RuntimeError(f"F3D 无法加载模型: {model_path}") from e
+            raise RuntimeError(
+                tr("F3D 无法加载模型: {path}", path=model_path)
+            ) from e
         try:
             camera = engine.window.camera
             camera.reset_to_bounds(0.9)
@@ -259,20 +267,28 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
 def check_f3d_runtime() -> int:
     """Validate the packaged F3D binding without opening a render window."""
     if is_bundled_app() and get_preview_runtime_args() != [sys.executable]:
-        print("F3D 自检失败: 打包程序的预览子进程启动参数不正确", file=sys.stderr)
+        print(
+            tr("F3D 自检失败: 打包程序的预览子进程启动参数不正确"),
+            file=sys.stderr,
+        )
         return 1
 
     try:
         import f3d
     except Exception as e:
-        print(f"F3D 自检失败: 无法导入 f3d: {e}", file=sys.stderr)
+        print(tr("F3D 自检失败: 无法导入 f3d: {error}", error=e), file=sys.stderr)
         return 1
 
     if not hasattr(f3d, "Engine"):
-        print("F3D 自检失败: f3d.Engine 不存在", file=sys.stderr)
+        print(tr("F3D 自检失败: f3d.Engine 不存在"), file=sys.stderr)
         return 1
 
-    print(f"F3D 自检通过: {getattr(f3d, '__version__', 'unknown')}")
+    print(
+        tr(
+            "F3D 自检通过: {version}",
+            version=getattr(f3d, "__version__", "unknown"),
+        )
+    )
     return 0
 
 
@@ -282,15 +298,58 @@ class ModelPreviewProcess:
     temp_dir: str
 
 
+def ask_yes_no(
+    parent: QWidget,
+    title: str,
+    text: str,
+    default_yes: bool = True,
+) -> bool:
+    dialog = QMessageBox(parent)
+    dialog.setIcon(QMessageBox.Icon.Question)
+    dialog.setWindowTitle(title)
+    dialog.setText(text)
+    dialog.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    dialog.setDefaultButton(
+        QMessageBox.StandardButton.Yes
+        if default_yes
+        else QMessageBox.StandardButton.No
+    )
+    yes_button = dialog.button(QMessageBox.StandardButton.Yes)
+    no_button = dialog.button(QMessageBox.StandardButton.No)
+    if yes_button is not None:
+        yes_button.setText(tr("是"))
+    if no_button is not None:
+        no_button.setText(tr("否"))
+    dialog.exec()
+    return (
+        dialog.standardButton(dialog.clickedButton())
+        == QMessageBox.StandardButton.Yes
+    )
+
+
+def ask_text(parent: QWidget, title: str, label: str) -> tuple[str, bool]:
+    dialog = QInputDialog(parent)
+    dialog.setInputMode(QInputDialog.InputMode.TextInput)
+    dialog.setWindowTitle(title)
+    dialog.setLabelText(label)
+    dialog.setOkButtonText(tr("确定"))
+    dialog.setCancelButtonText(tr("取消"))
+    accepted = bool(dialog.exec())
+    return dialog.textValue(), accepted
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SeaweedFS 文件浏览器")
         self.resize(1080, 720)
         self.setWindowIcon(get_app_window_icon())
 
         self.client = SeaweedClient()
         self.config = load_config()
+        set_language(self.config.language)
+        self.setWindowTitle(tr("SeaweedFS 文件浏览器"))
         self.current_dir = normalize_dir_path(self.config.root_dir)
         self.entries: List[Dict[str, Any]] = []
         self._directory_cache: LruCache[str, List[Dict[str, Any]]] = LruCache(
@@ -341,11 +400,12 @@ class MainWindow(QMainWindow):
         self.base_url_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         base_edit = self.base_url_input.lineEdit()
         if base_edit is not None:
-            base_edit.setPlaceholderText("例如: http://10.1.23.81:38888")
+            base_edit.setPlaceholderText(tr("例如: http://10.1.23.81:38888"))
         self.reload_combo_items(self.base_url_input, self.config.base_url_history, self.config.base_url)
-        top_row.addWidget(QLabel("服务地址:"))
+        self.base_url_label = QLabel(tr("服务地址:"))
+        top_row.addWidget(self.base_url_label)
         top_row.addWidget(self.base_url_input, 1)
-        self.open_config_btn = QPushButton("打开配置目录")
+        self.open_config_btn = QPushButton(tr("打开配置目录"))
         top_row.addWidget(self.open_config_btn)
         layout.addLayout(top_row)
 
@@ -355,10 +415,11 @@ class MainWindow(QMainWindow):
         self.root_dir_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         root_edit = self.root_dir_input.lineEdit()
         if root_edit is not None:
-            root_edit.setPlaceholderText("例如: /buckets/cax-dev/PARTING/")
+            root_edit.setPlaceholderText(tr("例如: /buckets/cax-dev/PARTING/"))
         self.reload_combo_items(self.root_dir_input, self.config.root_dir_history, self.config.root_dir)
-        self.load_root_btn = QPushButton("加载根目录")
-        dir_row.addWidget(QLabel("根目录:"))
+        self.load_root_btn = QPushButton(tr("加载根目录"))
+        self.root_dir_label = QLabel(tr("根目录:"))
+        dir_row.addWidget(self.root_dir_label)
         dir_row.addWidget(self.root_dir_input, 1)
         dir_row.addWidget(self.load_root_btn)
         layout.addLayout(dir_row)
@@ -369,10 +430,11 @@ class MainWindow(QMainWindow):
         self.search_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         search_edit = self.search_input.lineEdit()
         if search_edit is not None:
-            search_edit.setPlaceholderText("当前页中搜索（按名称过滤）")
+            search_edit.setPlaceholderText(tr("当前页中搜索（按名称过滤）"))
         self.reload_combo_items(self.search_input, self.config.search_history, "")
-        self.search_btn = QPushButton("重新搜索")
-        search_row.addWidget(QLabel("搜索:"))
+        self.search_btn = QPushButton(tr("重新搜索"))
+        self.search_label = QLabel(tr("搜索:"))
+        search_row.addWidget(self.search_label)
         search_row.addWidget(self.search_input, 1)
         search_row.addWidget(self.search_btn)
         layout.addLayout(search_row)
@@ -381,11 +443,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.path_label)
 
         browser_toolbar = QHBoxLayout()
-        self.up_btn = QPushButton("返回上级")
-        self.refresh_btn = QPushButton("刷新当前目录 (F5)")
-        self.save_dir_btn = QPushButton("保存到本地")
-        self.create_dir_btn = QPushButton("新建文件夹")
-        self.upload_files_btn = QPushButton("上传文件")
+        self.up_btn = QPushButton(tr("返回上级"))
+        self.refresh_btn = QPushButton(tr("刷新当前目录 (F5)"))
+        self.save_dir_btn = QPushButton(tr("保存到本地"))
+        self.create_dir_btn = QPushButton(tr("新建文件夹"))
+        self.upload_files_btn = QPushButton(tr("上传文件"))
         browser_toolbar.addWidget(self.up_btn)
         browser_toolbar.addWidget(self.refresh_btn)
         browser_toolbar.addWidget(self.save_dir_btn)
@@ -397,7 +459,17 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setColumnCount(9)
         self.tree.setHeaderLabels(
-            ["名称", "类型", "大小", "修改时间", "创建时间", "MIME类型", "MD5值", "权限模式", "分块数"]
+            [
+                tr("名称"),
+                tr("类型"),
+                tr("大小"),
+                tr("修改时间"),
+                tr("创建时间"),
+                tr("MIME类型"),
+                tr("MD5值"),
+                tr("权限模式"),
+                tr("分块数"),
+            ]
         )
         self.tree.setRootIsDecorated(False)
         self.tree.setAlternatingRowColors(True)
@@ -407,7 +479,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tree, 1)
 
         self.init_menu_bar()
-        self.refresh_action = QAction("刷新当前目录", self)
+        self.refresh_action = QAction(tr("刷新当前目录"), self)
         self.refresh_action.setShortcut("F5")
         self.refresh_action.triggered.connect(self.refresh_current_directory)
         self.addAction(self.refresh_action)
@@ -432,13 +504,91 @@ class MainWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
 
+        self.apply_language()
         self.load_directory(self.current_dir, force_reload=False)
 
     def init_menu_bar(self) -> None:
-        help_menu = self.menuBar().addMenu("帮助")
-        about_action = QAction("关于", self)
-        about_action.triggered.connect(self.show_about_dialog)
-        help_menu.addAction(about_action)
+        self.language_menu = self.menuBar().addMenu(tr("语言"))
+        self.language_action_group = QActionGroup(self)
+        self.language_action_group.setExclusive(True)
+        self.language_actions: Dict[str, QAction] = {}
+        for code, native_name in LANGUAGE_NAMES.items():
+            action = QAction(native_name, self)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, language=code: self.change_language(
+                    language,
+                    checked,
+                )
+            )
+            self.language_action_group.addAction(action)
+            self.language_menu.addAction(action)
+            self.language_actions[code] = action
+
+        self.help_menu = self.menuBar().addMenu(tr("帮助"))
+        self.about_action = QAction(tr("关于"), self)
+        self.about_action.triggered.connect(self.show_about_dialog)
+        self.help_menu.addAction(self.about_action)
+
+    def change_language(self, language: str, checked: bool = True) -> None:
+        if not checked or language == get_language():
+            return
+        self.config.language = set_language(language)
+        self.save_current_config()
+        self.apply_language()
+        self._status_controller.show_transient(
+            tr(
+                "语言已切换为 {language}",
+                language=LANGUAGE_NAMES[self.config.language],
+            )
+        )
+
+    def apply_language(self) -> None:
+        self.setWindowTitle(tr("SeaweedFS 文件浏览器"))
+        self.base_url_label.setText(tr("服务地址:"))
+        self.root_dir_label.setText(tr("根目录:"))
+        self.search_label.setText(tr("搜索:"))
+        base_edit = self.base_url_input.lineEdit()
+        if base_edit is not None:
+            base_edit.setPlaceholderText(tr("例如: http://10.1.23.81:38888"))
+        root_edit = self.root_dir_input.lineEdit()
+        if root_edit is not None:
+            root_edit.setPlaceholderText(tr("例如: /buckets/cax-dev/PARTING/"))
+        search_edit = self.search_input.lineEdit()
+        if search_edit is not None:
+            search_edit.setPlaceholderText(tr("当前页中搜索（按名称过滤）"))
+        self.open_config_btn.setText(tr("打开配置目录"))
+        self.load_root_btn.setText(tr("加载根目录"))
+        self.search_btn.setText(tr("重新搜索"))
+        self.up_btn.setText(tr("返回上级"))
+        self.refresh_btn.setText(tr("刷新当前目录 (F5)"))
+        self.save_dir_btn.setText(tr("保存到本地"))
+        self.create_dir_btn.setText(tr("新建文件夹"))
+        self.upload_files_btn.setText(tr("上传文件"))
+        self.tree.setHeaderLabels(
+            [
+                tr("名称"),
+                tr("类型"),
+                tr("大小"),
+                tr("修改时间"),
+                tr("创建时间"),
+                tr("MIME类型"),
+                tr("MD5值"),
+                tr("权限模式"),
+                tr("分块数"),
+            ]
+        )
+        self.refresh_action.setText(tr("刷新当前目录"))
+        self.language_menu.setTitle(tr("语言"))
+        self.help_menu.setTitle(tr("帮助"))
+        self.about_action.setText(tr("关于"))
+        for code, action in self.language_actions.items():
+            action.setChecked(code == get_language())
+        self.path_label.setText(tr("当前位置: {path}", path=self.current_dir))
+        self._task_center.retranslate_ui()
+        self._status_controller.retranslate_ui()
+        if self.entries:
+            self.render_entries()
 
     def show_about_dialog(self) -> None:
         about_text = (
@@ -446,7 +596,7 @@ class MainWindow(QMainWindow):
             "author: ganjb\nganjb_at_hustcad_dot_com"
         )
         dialog_parent = self if self.isVisible() else None
-        QMessageBox.information(dialog_parent, "关于", about_text)
+        QMessageBox.information(dialog_parent, tr("关于"), about_text)
 
     def get_base_url(self) -> str:
         return normalize_base_url(self.base_url_input.currentText())
@@ -488,7 +638,11 @@ class MainWindow(QMainWindow):
         try:
             open_path_in_file_explorer(config_dir)
         except Exception as e:
-            QMessageBox.critical(self, "打开失败", f"无法打开配置目录:\n{e}")
+            QMessageBox.critical(
+                self,
+                tr("打开失败"),
+                tr("无法打开配置目录:\n{error}", error=e),
+            )
 
     def load_root_directory(self) -> None:
         self.remember_input_histories(include_search=False)
@@ -508,7 +662,10 @@ class MainWindow(QMainWindow):
         self.entries = list(cached_entries)
         self.render_entries()
         self._status_controller.show_transient(
-            f"已从缓存加载 {len(cached_entries)} 条，按 F5 可重新加载"
+            tr(
+                "已从缓存加载 {count} 条，按 F5 可重新加载",
+                count=len(cached_entries),
+            )
         )
         return True
 
@@ -518,14 +675,14 @@ class MainWindow(QMainWindow):
     def load_directory(self, dir_path: str, force_reload: bool) -> None:
         base_url = self.get_base_url()
         if not base_url:
-            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
             return
         if self.is_task_active(self._directory_load_task_id):
-            self._status_controller.show_transient("正在加载，请稍候...")
+            self._status_controller.show_transient(tr("正在加载，请稍候..."))
             return
         self.current_dir = normalize_dir_path(dir_path)
         self.remember_input_histories(include_search=False)
-        self.path_label.setText(f"当前位置: {self.current_dir}")
+        self.path_label.setText(tr("当前位置: {path}", path=self.current_dir))
         if not force_reload and self.try_apply_cached_directory(base_url, self.current_dir):
             return
         self.start_directory_load(base_url, self.current_dir)
@@ -541,7 +698,7 @@ class MainWindow(QMainWindow):
         self._directory_load_task_id = self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.DIRECTORY_LOAD,
-                title="加载目录",
+                title=tr("加载目录"),
                 detail=dir_path,
                 dedup_key=f"directory-load:{base_url}:{dir_path}",
             ),
@@ -553,16 +710,18 @@ class MainWindow(QMainWindow):
         cache_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
         self._directory_cache.put(cache_key, list(entries))
         self.render_entries()
-        self._status_controller.show_transient(f"已加载 {len(entries)} 条")
+        self._status_controller.show_transient(
+            tr("已加载 {count} 条", count=len(entries))
+        )
 
     def on_directory_load_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "加载失败", error.message)
-        self._status_controller.show_transient("加载失败")
+            QMessageBox.critical(self, tr("加载失败"), error.message)
+        self._status_controller.show_transient(tr("加载失败"))
 
     def on_directory_load_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            self._status_controller.show_transient("目录加载已取消")
+            self._status_controller.show_transient(tr("目录加载已取消"))
 
     def on_directory_load_thread_cleaned(self) -> None:
         self._directory_load_task_id = None
@@ -598,7 +757,7 @@ class MainWindow(QMainWindow):
             full_path = str(entry.get("FullPath", ""))
             name = basename(full_path)
             dir_flag = is_directory(entry)
-            type_text = "文件夹" if dir_flag else "文件"
+            type_text = tr("文件夹") if dir_flag else tr("文件")
             file_size_raw = sanitize_positive_int(entry.get("FileSize", 0), 0) if not dir_flag else 0
             size = format_size(file_size_raw) if not dir_flag else ""
             mtime_raw = parse_time_sort_value(entry.get("Mtime", 0))
@@ -663,12 +822,12 @@ class MainWindow(QMainWindow):
     def show_tree_context_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         menu = QMenu(self)
-        create_action = menu.addAction("新建文件夹")
-        upload_action = menu.addAction("上传文件")
+        create_action = menu.addAction(tr("新建文件夹"))
+        upload_action = menu.addAction(tr("上传文件"))
         details_action = None
         if item is not None:
             menu.addSeparator()
-            details_action = menu.addAction("查看详细信息")
+            details_action = menu.addAction(tr("查看详细信息"))
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action == create_action:
             self.create_remote_directory()
@@ -703,32 +862,44 @@ class MainWindow(QMainWindow):
 
     def create_remote_directory(self) -> None:
         if self.is_task_active(self._create_directory_task_id):
-            QMessageBox.information(self, "任务进行中", "已有目录创建任务正在执行。")
+            QMessageBox.information(
+                self,
+                tr("任务进行中"),
+                tr("已有目录创建任务正在执行。"),
+            )
             return
         base_url = self.get_base_url()
         if not base_url:
-            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
             return
         if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
-            QMessageBox.warning(self, "路径错误", "当前目录超出配置的根目录，拒绝写入。")
+            QMessageBox.warning(
+                self,
+                tr("路径错误"),
+                tr("当前目录超出配置的根目录，拒绝写入。"),
+            )
             return
-        name, accepted = QInputDialog.getText(self, "新建文件夹", "文件夹名称:")
+        name, accepted = ask_text(
+            self,
+            tr("新建文件夹"),
+            tr("文件夹名称:"),
+        )
         if not accepted:
             return
         try:
             target_path = join_remote_child(self.current_dir, name)
         except ValueError as error:
-            QMessageBox.warning(self, "名称无效", str(error))
+            QMessageBox.warning(self, tr("名称无效"), str(error))
             return
 
         existing = self.existing_entries_by_name().get(basename(target_path))
         if existing is not None:
             message = (
-                "同名文件夹已经存在。"
+                tr("同名文件夹已经存在。")
                 if is_directory(existing)
-                else "同名文件已经存在，不能创建文件夹。"
+                else tr("同名文件已经存在，不能创建文件夹。")
             )
-            QMessageBox.information(self, "名称冲突", message)
+            QMessageBox.information(self, tr("名称冲突"), message)
             return
 
         parent_dir = self.current_dir
@@ -742,7 +913,7 @@ class MainWindow(QMainWindow):
         self._create_directory_task_id = self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.DIRECTORY_CREATE,
-                title="创建文件夹",
+                title=tr("创建文件夹"),
                 detail=target_path,
                 dedup_key=f"directory-create:{base_url}:{target_path}",
             ),
@@ -756,14 +927,14 @@ class MainWindow(QMainWindow):
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
             self._status_controller.show_transient(
-                f"文件夹已创建: {basename(target_path)}"
+                tr("文件夹已创建: {name}", name=basename(target_path))
             )
 
     def on_create_directory_cancelled(self, base_url: str, parent_dir: str) -> None:
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
             self._status_controller.show_transient(
-                "目录创建已取消，正在确认远程状态"
+                tr("目录创建已取消，正在确认远程状态")
             )
 
     def on_create_directory_failed(
@@ -774,29 +945,33 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "创建文件夹失败", error.message)
-            self._status_controller.show_transient("目录创建失败")
+            QMessageBox.critical(self, tr("创建文件夹失败"), error.message)
+            self._status_controller.show_transient(tr("目录创建失败"))
 
     def select_files_to_upload(self) -> None:
         if self.is_task_active(self._upload_task_id):
             QMessageBox.information(
                 self,
-                "上传进行中",
-                "已有上传批次正在执行，请等待完成或先取消。",
+                tr("上传进行中"),
+                tr("已有上传批次正在执行，请等待完成或先取消。"),
             )
             return
         base_url = self.get_base_url()
         if not base_url:
-            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
             return
         if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
-            QMessageBox.warning(self, "路径错误", "当前目录超出配置的根目录，拒绝写入。")
+            QMessageBox.warning(
+                self,
+                tr("路径错误"),
+                tr("当前目录超出配置的根目录，拒绝写入。"),
+            )
             return
         local_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "选择要上传的文件",
+            tr("选择要上传的文件"),
             "",
-            "所有文件 (*)",
+            tr("所有文件 (*)"),
         )
         if not local_paths:
             return
@@ -812,7 +987,7 @@ class MainWindow(QMainWindow):
         try:
             items = build_upload_items(local_paths, target_dir, join_remote_child)
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "无法上传", str(error))
+            QMessageBox.warning(self, tr("无法上传"), str(error))
             return
 
         existing = self.existing_entries_by_name()
@@ -827,11 +1002,17 @@ class MainWindow(QMainWindow):
         if blocked_names:
             shown = "\n".join(blocked_names[:10])
             if len(blocked_names) > 10:
-                shown += f"\n...另有 {len(blocked_names) - 10} 项"
+                shown += "\n" + tr(
+                    "...另有 {count} 项",
+                    count=len(blocked_names) - 10,
+                )
             QMessageBox.warning(
                 self,
-                "存在目录冲突",
-                f"以下名称已经是远程文件夹，不能作为文件覆盖:\n{shown}",
+                tr("存在目录冲突"),
+                tr(
+                    "以下名称已经是远程文件夹，不能作为文件覆盖:\n{names}",
+                    names=shown,
+                ),
             )
             blocked = set(blocked_names)
             items = [item for item in items if basename(item.remote_path) not in blocked]
@@ -845,15 +1026,16 @@ class MainWindow(QMainWindow):
             and not is_directory(existing[basename(item.remote_path)])
         )
         if confirm_overwrite and overwrite_count:
-            answer = QMessageBox.question(
+            should_overwrite = ask_yes_no(
                 self,
-                "确认覆盖上传",
-                f"{overwrite_count} 个同名文件将被覆盖。\n"
-                f"本次共上传 {len(items)} 个文件，是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
+                tr("确认覆盖上传"),
+                tr(
+                    "{count} 个同名文件将被覆盖。\n本次共上传 {total} 个文件，是否继续？",
+                    count=overwrite_count,
+                    total=len(items),
+                ),
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            if not should_overwrite:
                 return
         self.start_upload_batch(items, base_url, target_dir)
 
@@ -877,7 +1059,7 @@ class MainWindow(QMainWindow):
         self._upload_task_id = self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.FILE_UPLOAD,
-                title=f"上传 {len(items)} 个文件",
+                title=tr("上传 {count} 个文件", count=len(items)),
                 detail=f"{target_dir} · {format_size(total_bytes)}",
                 dedup_key="upload-batch",
             ),
@@ -894,7 +1076,11 @@ class MainWindow(QMainWindow):
         if self._closing_after_task_cancel:
             return
         self._status_controller.show_transient(
-            f"上传完成: {uploaded_files}/{total_files}"
+            tr(
+                "上传完成: {uploaded}/{total}",
+                uploaded=uploaded_files,
+                total=total_files,
+            )
         )
         if not failures:
             return
@@ -905,15 +1091,21 @@ class MainWindow(QMainWindow):
             if isinstance(failure, dict)
         )
         if len(failures) > 8:
-            details += f"\n...另有 {len(failures) - 8} 项"
-        answer = QMessageBox.question(
+            details += "\n" + tr(
+                "...另有 {count} 项",
+                count=len(failures) - 8,
+            )
+        should_retry = ask_yes_no(
             self,
-            "部分文件上传失败",
-            f"已上传 {uploaded_files}/{total_files} 个文件。\n\n{details}\n\n是否重试失败项？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            tr("部分文件上传失败"),
+            tr(
+                "已上传 {uploaded}/{total} 个文件。\n\n{details}\n\n是否重试失败项？",
+                uploaded=uploaded_files,
+                total=total_files,
+                details=details,
+            ),
         )
-        if answer == QMessageBox.StandardButton.Yes:
+        if should_retry:
             retry_paths = [
                 str(failure.get("local_path", ""))
                 for failure in failures
@@ -925,7 +1117,7 @@ class MainWindow(QMainWindow):
         self.invalidate_remote_directory(base_url, target_dir)
         if not self._closing_after_task_cancel:
             self._status_controller.show_transient(
-                "上传已取消，正在确认远程状态"
+                tr("上传已取消，正在确认远程状态")
             )
 
     def on_upload_failed(
@@ -939,8 +1131,8 @@ class MainWindow(QMainWindow):
             return
         self.invalidate_remote_directory(base_url, target_dir)
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "上传失败", error.message)
-            self._status_controller.show_transient("上传失败")
+            QMessageBox.critical(self, tr("上传失败"), error.message)
+            self._status_controller.show_transient(tr("上传失败"))
 
     def open_entry_details(self, item: QTreeWidgetItem) -> None:
         entry = item.data(2, Qt.ItemDataRole.UserRole)
@@ -952,7 +1144,11 @@ class MainWindow(QMainWindow):
             return
         details_json = json.dumps(entry, ensure_ascii=False, indent=2)
         details_text = f"FullPath: {full_path}\n\n{details_json}"
-        dlg = EntryDetailDialog(f"详细信息: {full_path}", details_text, self)
+        dlg = EntryDetailDialog(
+            tr("详细信息: {path}", path=full_path),
+            details_text,
+            self,
+        )
         self.show_preview_window(preview_key, dlg)
 
     def build_preview_window_key(self, preview_type: str, full_path: str) -> str:
@@ -1017,7 +1213,7 @@ class MainWindow(QMainWindow):
             return
         base_url = self.get_base_url()
         if not base_url:
-            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
             return
         if preview_type == "model" and self.activate_model_preview_process(preview_key):
             return
@@ -1031,9 +1227,11 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "预览任务较多",
-                f"最多同时准备 {self.config.max_concurrent_preview_loads} 个预览，"
-                "请等待当前任务完成或先取消其中一个。",
+                tr("预览任务较多"),
+                tr(
+                    "最多同时准备 {limit} 个预览，请等待当前任务完成或先取消其中一个。",
+                    limit=self.config.max_concurrent_preview_loads,
+                ),
             )
             return
         if preview_type == "model":
@@ -1042,8 +1240,11 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(
                     self,
-                    "模型预览失败",
-                    f"F3D 运行环境不可用，请检查安装或打包内容。\n\n{e}",
+                    tr("模型预览失败"),
+                    tr(
+                        "F3D 运行环境不可用，请检查安装或打包内容。\n\n{error}",
+                        error=e,
+                    ),
                 )
                 return
         self.start_preview_load(preview_key, preview_type, base_url, full_path)
@@ -1055,13 +1256,17 @@ class MainWindow(QMainWindow):
         base_url: str,
         full_path: str,
     ) -> None:
-        type_labels = {"text": "文本", "image": "图片", "model": "模型"}
-        label = type_labels.get(preview_type, "文件")
+        type_labels = {
+            "text": tr("文本"),
+            "image": tr("图片"),
+            "model": tr("模型"),
+        }
+        label = type_labels.get(preview_type, tr("文件"))
         worker = PreviewLoadWorker(self.client, preview_type, base_url, full_path)
         task_id = self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.PREVIEW_LOAD,
-                title=f"{label}预览",
+                title=tr("{type}预览", type=label),
                 detail=full_path,
                 dedup_key=f"preview:{preview_key}",
             ),
@@ -1081,7 +1286,7 @@ class MainWindow(QMainWindow):
         try:
             if preview_type == "text":
                 dlg = PreviewDialog(
-                    f"预览: {full_path}",
+                    tr("预览: {path}", path=full_path),
                     str(result.get("content", "")),
                     on_save_as=lambda path=full_path: self.save_single_file_to_local(path),
                     parent=self,
@@ -1089,7 +1294,7 @@ class MainWindow(QMainWindow):
                 self.show_preview_window(preview_key, dlg)
             elif preview_type == "image":
                 dlg = ImagePreviewDialog(
-                    f"图片预览: {full_path}",
+                    tr("图片预览: {path}", path=full_path),
                     local_path,
                     on_save_as=lambda path=full_path: self.save_single_file_to_local(path),
                     parent=self,
@@ -1108,25 +1313,27 @@ class MainWindow(QMainWindow):
                 )
                 temp_dir = ""
             else:
-                raise RuntimeError(f"不支持的预览类型: {preview_type}")
+                raise RuntimeError(
+                    tr("不支持的预览类型: {type}", type=preview_type)
+                )
             self._status_controller.show_transient(
-                f"已打开预览: {basename(full_path)}"
+                tr("已打开预览: {name}", name=basename(full_path))
             )
         except Exception as e:
             if not self._closing_after_task_cancel:
-                QMessageBox.critical(self, "预览失败", str(e))
+                QMessageBox.critical(self, tr("预览失败"), str(e))
         finally:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
     def on_preview_load_cancelled(self, preview_key: str) -> None:
         if not self._closing_after_task_cancel:
-            self._status_controller.show_transient("预览加载已取消")
+            self._status_controller.show_transient(tr("预览加载已取消"))
 
     def on_preview_load_failed(self, preview_key: str, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "预览失败", error.message)
-            self._status_controller.show_transient("预览加载失败")
+            QMessageBox.critical(self, tr("预览失败"), error.message)
+            self._status_controller.show_transient(tr("预览加载失败"))
 
     def on_preview_load_thread_cleaned(self, preview_key: str) -> None:
         self._preview_load_tasks.pop(preview_key, None)
@@ -1136,7 +1343,7 @@ class MainWindow(QMainWindow):
         if record is None:
             return False
         if record.process.poll() is None:
-            self._status_controller.show_transient("该模型预览窗口已经打开")
+            self._status_controller.show_transient(tr("该模型预览窗口已经打开"))
             return True
         self._model_preview_processes.pop(preview_key, None)
         shutil.rmtree(record.temp_dir, ignore_errors=True)
@@ -1173,13 +1380,20 @@ class MainWindow(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "保存任务较多",
-                f"最多同时保存 {self.config.max_concurrent_file_saves} 个文件，"
-                "请等待当前任务完成或先取消其中一个。",
+                tr("保存任务较多"),
+                tr(
+                    "最多同时保存 {limit} 个文件，请等待当前任务完成或先取消其中一个。",
+                    limit=self.config.max_concurrent_file_saves,
+                ),
             )
             return
         default_name = basename(full_path)
-        save_path, _ = QFileDialog.getSaveFileName(self, "另存为", default_name, "所有文件 (*)")
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("另存为"),
+            default_name,
+            tr("所有文件 (*)"),
+        )
         if not save_path:
             return
         worker = FileDownloadWorker(
@@ -1191,7 +1405,7 @@ class MainWindow(QMainWindow):
         self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.FILE_DOWNLOAD,
-                title=f"保存文件：{basename(full_path)}",
+                title=tr("保存文件：{name}", name=basename(full_path)),
                 detail=save_path,
                 dedup_key=f"file-download:{self.get_base_url()}:{full_path}:{save_path}",
             ),
@@ -1200,29 +1414,42 @@ class MainWindow(QMainWindow):
 
     def on_file_save_finished(self, save_path: str) -> None:
         if not self._closing_after_task_cancel:
-            self._status_controller.show_transient(f"保存完成: {save_path}")
+            self._status_controller.show_transient(
+                tr("保存完成: {path}", path=save_path)
+            )
 
     def on_file_save_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            self._status_controller.show_transient("文件保存已中断")
+            self._status_controller.show_transient(tr("文件保存已中断"))
 
     def on_file_save_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "保存失败", error.message)
-            self._status_controller.show_transient("文件保存失败")
+            QMessageBox.critical(self, tr("保存失败"), error.message)
+            self._status_controller.show_transient(tr("文件保存失败"))
 
     def save_current_directory_to_local(self) -> None:
         if self.is_task_active(self._directory_load_task_id):
-            QMessageBox.information(self, "任务进行中", "目录正在加载中，请稍后再保存。")
+            QMessageBox.information(
+                self,
+                tr("任务进行中"),
+                tr("目录正在加载中，请稍后再保存。"),
+            )
             return
         if self.is_task_active(self._directory_save_task_id):
-            QMessageBox.information(self, "任务进行中", "已存在保存任务，请先等待完成或中断。")
+            QMessageBox.information(
+                self,
+                tr("任务进行中"),
+                tr("已存在保存任务，请先等待完成或中断。"),
+            )
             return
         base_url = self.get_base_url()
         if not base_url:
-            QMessageBox.warning(self, "参数错误", "地址不能为空")
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
             return
-        target_dir = QFileDialog.getExistingDirectory(self, "选择本地保存目录")
+        target_dir = QFileDialog.getExistingDirectory(
+            self,
+            tr("选择本地保存目录"),
+        )
         if not target_dir:
             return
 
@@ -1237,7 +1464,10 @@ class MainWindow(QMainWindow):
         self._directory_save_task_id = self._task_manager.start(
             TaskSpec(
                 kind=TaskKind.DIRECTORY_DOWNLOAD,
-                title=f"保存目录：{basename(self.current_dir)}",
+                title=tr(
+                    "保存目录：{name}",
+                    name=basename(self.current_dir),
+                ),
                 detail=target_dir,
                 dedup_key="directory-download",
             ),
@@ -1249,22 +1479,33 @@ class MainWindow(QMainWindow):
         downloaded_files = int(result.get("downloaded_files", 0))
         target_dir = str(result.get("target_dir", ""))
         self._status_controller.show_transient(
-            f"保存完成: {downloaded_files}/{total_files}"
+            tr(
+                "保存完成: {downloaded}/{total}",
+                downloaded=downloaded_files,
+                total=total_files,
+            )
         )
         if target_dir and not self._closing_after_task_cancel:
             try:
                 open_path_in_file_explorer(target_dir)
             except Exception as e:
-                QMessageBox.warning(self, "提示", f"保存完成，但自动打开目录失败:\n{e}")
+                QMessageBox.warning(
+                    self,
+                    tr("提示"),
+                    tr(
+                        "保存完成，但自动打开目录失败:\n{error}",
+                        error=e,
+                    ),
+                )
 
     def on_save_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            self._status_controller.show_transient("保存已中断")
+            self._status_controller.show_transient(tr("保存已中断"))
 
     def on_save_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "保存失败", error.message)
-        self._status_controller.show_transient("保存失败")
+            QMessageBox.critical(self, tr("保存失败"), error.message)
+        self._status_controller.show_transient(tr("保存失败"))
 
     def on_save_thread_cleaned(self) -> None:
         self._directory_save_task_id = None
@@ -1284,7 +1525,7 @@ class MainWindow(QMainWindow):
         try:
             items = build_upload_items(local_paths, target_dir, join_remote_child)
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "无法重试上传", str(error))
+            QMessageBox.warning(self, tr("无法重试上传"), str(error))
             return
         if items:
             QTimer.singleShot(
@@ -1398,7 +1639,7 @@ class MainWindow(QMainWindow):
             self._closing_after_task_cancel = True
             self.setEnabled(False)
             self._status_controller.show_transient(
-                "正在取消后台任务并清理临时资源...",
+                tr("正在取消后台任务并清理临时资源..."),
                 timeout_ms=0,
             )
             self._task_manager.cancel_all()
@@ -1411,6 +1652,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    set_language(load_config().language)
     if len(sys.argv) >= 2 and sys.argv[1] == "--check-f3d-runtime":
         return check_f3d_runtime()
 

@@ -4,6 +4,7 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QLabel, QProgressBar, QPushButton, QStatusBar
 
 from .core import format_size
+from .i18n import tr
 from .task_models import (
     ProgressMode,
     ProgressUnit,
@@ -15,19 +16,20 @@ from .task_models import (
 from .task_runtime import TaskManager
 
 
-STATE_TEXT = {
-    TaskState.QUEUED: "等待中",
-    TaskState.RUNNING: "运行中",
-    TaskState.CANCELLING: "正在取消",
-    TaskState.SUCCEEDED: "已完成",
-    TaskState.FAILED: "失败",
-    TaskState.CANCELLED: "已取消",
-}
+def format_task_state(state: TaskState) -> str:
+    return {
+        TaskState.QUEUED: tr("等待中"),
+        TaskState.RUNNING: tr("运行中"),
+        TaskState.CANCELLING: tr("正在取消"),
+        TaskState.SUCCEEDED: tr("已完成"),
+        TaskState.FAILED: tr("失败"),
+        TaskState.CANCELLED: tr("已取消"),
+    }[state]
 
 
 def format_progress(progress: TaskProgress) -> str:
     if progress.mode == ProgressMode.INDETERMINATE:
-        return progress.phase or "处理中"
+        return progress.phase or tr("处理中")
     if progress.unit == ProgressUnit.BYTES:
         value = f"{format_size(progress.current)} / {format_size(progress.total)}"
     else:
@@ -40,7 +42,7 @@ def format_progress(progress: TaskProgress) -> str:
 
 def format_task_summary(snapshot: TaskSnapshot) -> str:
     if snapshot.state == TaskState.CANCELLING:
-        return f"正在取消：{snapshot.spec.title}"
+        return tr("正在取消：{title}", title=snapshot.spec.title)
     text = snapshot.spec.title
     progress_text = format_progress(snapshot.progress)
     if progress_text:
@@ -59,17 +61,17 @@ class TaskStatusController(QObject):
         super().__init__(parent)
         self.manager = manager
         self.status_bar = status_bar
-        self._transient_message = "就绪"
+        self._transient_message = tr("就绪")
         self._transient_timer = QTimer(self)
         self._transient_timer.setSingleShot(True)
         self._transient_timer.timeout.connect(self._clear_transient)
 
-        self.label = QLabel("就绪")
+        self.label = QLabel(tr("就绪"))
         self.progress = QProgressBar()
         self.progress.setFixedWidth(150)
         self.progress.setTextVisible(False)
         self.progress.hide()
-        self.tasks_button = QPushButton("任务")
+        self.tasks_button = QPushButton(tr("任务"))
         self.tasks_button.clicked.connect(on_show_tasks)
         self.tasks_button.hide()
         status_bar.addWidget(self.label, 1)
@@ -89,7 +91,11 @@ class TaskStatusController(QObject):
         self.refresh()
 
     def _clear_transient(self) -> None:
-        self._transient_message = "就绪"
+        self._transient_message = tr("就绪")
+        self.refresh()
+
+    def retranslate_ui(self) -> None:
+        self._transient_message = tr("就绪")
         self.refresh()
 
     def refresh(self) -> None:
@@ -101,14 +107,18 @@ class TaskStatusController(QObject):
         if primary is None:
             self.progress.hide()
             self.label.setText(
-                f"{failed_count} 个任务失败，点击查看"
+                tr("{count} 个任务失败，点击查看", count=failed_count)
                 if failed_count
                 else self._transient_message
             )
         else:
             summary = format_task_summary(primary)
             if len(active) > 1:
-                summary = f"{len(active)} 个后台任务 · {summary}"
+                summary = tr(
+                    "{count} 个后台任务 · {summary}",
+                    count=len(active),
+                    summary=summary,
+                )
             self.label.setText(summary)
             percent = primary.progress.percent()
             if percent is None:
@@ -119,5 +129,5 @@ class TaskStatusController(QObject):
             self.progress.show()
         task_count = len(active)
         history_count = len(self.manager.snapshots())
-        self.tasks_button.setText(f"任务 ({task_count})")
+        self.tasks_button.setText(tr("任务 ({count})", count=task_count))
         self.tasks_button.setVisible(bool(history_count))

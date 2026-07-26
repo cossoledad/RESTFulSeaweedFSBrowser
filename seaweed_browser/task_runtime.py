@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
+from .i18n import tr
 from .task_models import (
     ACTIVE_TASK_STATES,
     TERMINAL_TASK_STATES,
@@ -87,10 +88,16 @@ class TaskManager(QObject):
 
     def start(self, spec: TaskSpec, worker: QObject) -> str:
         if spec.dedup_key and self.find_active_by_dedup_key(spec.dedup_key):
-            raise RuntimeError(f"任务已经存在: {spec.dedup_key}")
+            raise RuntimeError(tr("任务已经存在: {key}", key=spec.dedup_key))
         limit = self.kind_limits.get(spec.kind)
         if limit is not None and self.count(spec.kind) >= limit:
-            raise RuntimeError(f"{spec.title}任务已达到并发上限 {limit}")
+            raise RuntimeError(
+                tr(
+                    "{title}任务已达到并发上限 {limit}",
+                    title=spec.title,
+                    limit=limit,
+                )
+            )
 
         task_id = uuid.uuid4().hex
         now = time.time()
@@ -155,7 +162,7 @@ class TaskManager(QObject):
         error: Optional[TaskError] = None,
     ) -> None:
         if state not in TERMINAL_TASK_STATES:
-            raise ValueError(f"非法终态: {state}")
+            raise ValueError(tr("非法终态: {state}", state=state))
         snapshot = self.get(task_id)
         if snapshot is None or snapshot.state in TERMINAL_TASK_STATES:
             return
@@ -189,7 +196,7 @@ class TaskManager(QObject):
             self._set_terminal(
                 task_id,
                 TaskState.FAILED,
-                TaskError("后台线程意外退出"),
+                TaskError(tr("后台线程意外退出")),
             )
         self._tasks.pop(task_id, None)
         self.task_cleaned.emit(task_id)

@@ -2,7 +2,7 @@
 
 用于浏览 SeaweedFS Filer 中的文件与目录。
 
-当前版本：`1.0.11`
+当前版本：`1.0.12`
 
 ## Windows 下载
 
@@ -22,6 +22,10 @@
 - 当前页搜索（按名称过滤当前目录已加载条目）
 - 文件列表支持点击任意列表头排序，大小、时间、分块数按原始值排序
 - 文件夹浏览（双击进入）
+- 在当前远程目录新建文件夹，名称经过路径边界校验
+- 选择一个或多个本地文件上传到当前目录，同名文件默认覆盖
+- 上传采用固定并发流式传输，不会将大文件整体读入内存
+- 上传进度窗口为非模态，可取消任务；部分失败时可只重试失败项
 - 文本文件预览（双击文件，按文本预览）
 - 图片预览（支持 `png/jpg/jpeg/bmp/gif/webp`）
 - 模型预览（支持 `glb/gltf`，通过 `f3d` 打开）
@@ -41,10 +45,11 @@
 
 - `main.py`：应用入口、主窗口和 F3D 子进程入口
 - `seaweed_browser/core.py`：版本、配置、路径和格式化规则
-- `seaweed_browser/client.py`：SeaweedFS HTTP 访问与原子下载
+- `seaweed_browser/client.py`：SeaweedFS HTTP 访问、流式上传与原子下载
 - `seaweed_browser/tasks.py`：统一任务管理器及后台 Worker
 - `seaweed_browser/cache.py`：有界 LRU 缓存
 - `seaweed_browser/downloads.py`：固定并发批量下载调度
+- `seaweed_browser/uploads.py`：上传计划、固定并发调度和部分失败汇总
 - `seaweed_browser/model_files.py`：GLB/GLTF 格式及外部资源解析
 - `seaweed_browser/widgets.py`：文本、图片和详细信息预览控件
 - `tests/`：不依赖图形环境的核心单元测试
@@ -69,12 +74,13 @@ Windows 下默认保存在：
   "page_limit": 1000,
   "directory_cache_max_entries": 32,
   "directory_download_workers": 4,
+  "upload_workers": 3,
   "max_concurrent_preview_loads": 3,
   "max_concurrent_file_saves": 3
 }
 ```
 
-为避免配置错误耗尽资源，目录缓存最多允许 256 项，递归下载线程最多 16 个，
+为避免配置错误耗尽资源，目录缓存最多允许 256 项，递归下载和上传线程最多 16 个，
 预览准备和单文件保存任务上限最多 16 个。
 
 ## 运行

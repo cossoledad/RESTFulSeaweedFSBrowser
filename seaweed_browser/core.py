@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -20,10 +20,12 @@ DOWNLOAD_CHUNK_SIZE = 65536
 MAX_HISTORY = 100
 DIRECTORY_CACHE_MAX_ENTRIES = 32
 DIRECTORY_DOWNLOAD_WORKERS = 4
+UPLOAD_WORKERS = 3
 MAX_CONCURRENT_PREVIEW_LOADS = 3
 MAX_CONCURRENT_FILE_SAVES = 3
 DIRECTORY_CACHE_MAX_LIMIT = 256
 DIRECTORY_DOWNLOAD_WORKERS_LIMIT = 16
+UPLOAD_WORKERS_LIMIT = 16
 CONCURRENT_TASK_LIMIT = 16
 SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
@@ -57,6 +59,7 @@ class AppConfig:
     page_limit: int = PAGE_LIMIT
     directory_cache_max_entries: int = DIRECTORY_CACHE_MAX_ENTRIES
     directory_download_workers: int = DIRECTORY_DOWNLOAD_WORKERS
+    upload_workers: int = UPLOAD_WORKERS
     max_concurrent_preview_loads: int = MAX_CONCURRENT_PREVIEW_LOADS
     max_concurrent_file_saves: int = MAX_CONCURRENT_FILE_SAVES
     base_url_history: List[str] = field(default_factory=list)
@@ -87,6 +90,11 @@ def load_config() -> AppConfig:
                 raw.get("directory_download_workers", DIRECTORY_DOWNLOAD_WORKERS),
                 DIRECTORY_DOWNLOAD_WORKERS,
                 DIRECTORY_DOWNLOAD_WORKERS_LIMIT,
+            ),
+            upload_workers=sanitize_bounded_int(
+                raw.get("upload_workers", UPLOAD_WORKERS),
+                UPLOAD_WORKERS,
+                UPLOAD_WORKERS_LIMIT,
             ),
             max_concurrent_preview_loads=sanitize_bounded_int(
                 raw.get(
@@ -124,6 +132,11 @@ def save_config(cfg: AppConfig) -> None:
             cfg.directory_download_workers,
             DIRECTORY_DOWNLOAD_WORKERS,
             DIRECTORY_DOWNLOAD_WORKERS_LIMIT,
+        ),
+        "upload_workers": sanitize_bounded_int(
+            cfg.upload_workers,
+            UPLOAD_WORKERS,
+            UPLOAD_WORKERS_LIMIT,
         ),
         "max_concurrent_preview_loads": sanitize_bounded_int(
             cfg.max_concurrent_preview_loads,
@@ -190,6 +203,35 @@ def basename(path: str) -> str:
         return "/"
     name = stripped.split("/")[-1]
     return name or "/"
+
+
+def validate_remote_child_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        raise ValueError("名称不能为空")
+    if value in {".", ".."}:
+        raise ValueError("名称不能为 . 或 ..")
+    if "/" in value or "\\" in value:
+        raise ValueError("名称不能包含路径分隔符")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("名称不能包含控制字符")
+    return value
+
+
+def join_remote_child(directory: str, name: str) -> str:
+    child_name = validate_remote_child_name(name)
+    parent = normalize_dir_path(directory).rstrip("/")
+    if not parent:
+        return f"/{child_name}"
+    return f"{parent}/{child_name}"
+
+
+def remote_path_is_within_root(path: str, root_dir: str) -> bool:
+    candidate = posixpath.normpath(normalize_dir_path(path))
+    root = posixpath.normpath(normalize_dir_path(root_dir))
+    if root == "/":
+        return candidate.startswith("/")
+    return candidate == root or candidate.startswith(root.rstrip("/") + "/")
 
 
 def get_path_extension(path: str) -> str:

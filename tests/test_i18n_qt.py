@@ -1,5 +1,9 @@
+import os
 import unittest
 from unittest.mock import patch
+
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtWidgets import QApplication
@@ -12,10 +16,19 @@ except ImportError:
     HAS_QT = False
 
 
+_QT_APP = None
+
+
+def qt_application():
+    global _QT_APP
+    _QT_APP = QApplication.instance() or QApplication([])
+    return _QT_APP
+
+
 @unittest.skipUnless(HAS_QT, "PySide6 is not installed in the lightweight test environment")
 class I18nQtTests(unittest.TestCase):
     def test_main_window_retranslates_and_persists_language(self) -> None:
-        app = QApplication.instance() or QApplication([])
+        app = qt_application()
         config = AppConfig(language="zh_CN")
         with (
             patch("main.load_config", return_value=config),

@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressDialog,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -64,9 +63,12 @@ from seaweed_browser.tasks import (
     FileDownloadWorker,
     PreviewLoadWorker,
     SaveDirectoryWorker,
-    TaskManager,
     UploadBatchWorker,
 )
+from seaweed_browser.task_models import TaskError, TaskKind, TaskSpec
+from seaweed_browser.task_presenter import TaskStatusController
+from seaweed_browser.task_runtime import TaskManager
+from seaweed_browser.task_widgets import TaskCenterDock
 from seaweed_browser.uploads import UploadItem, build_upload_items
 from seaweed_browser.resources import (
     get_app_window_icon,
@@ -281,11 +283,6 @@ class ModelPreviewProcess:
 
 
 class MainWindow(QMainWindow):
-    DIRECTORY_LOAD_TASK = "directory-load"
-    DIRECTORY_SAVE_TASK = "directory-save"
-    CREATE_DIRECTORY_TASK = "create-directory"
-    UPLOAD_BATCH_TASK = "upload-batch"
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SeaweedFS 文件浏览器")
@@ -299,21 +296,35 @@ class MainWindow(QMainWindow):
         self._directory_cache: LruCache[str, List[Dict[str, Any]]] = LruCache(
             self.config.directory_cache_max_entries
         )
-        self._loading_dialog: Optional[QProgressDialog] = None
-        self._save_dialog: Optional[QProgressDialog] = None
-        self._create_directory_dialog: Optional[QProgressDialog] = None
-        self._upload_dialog: Optional[QProgressDialog] = None
-        self._file_save_dialogs: Dict[str, QProgressDialog] = {}
         self._preview_windows: Dict[str, QWidget] = {}
-        self._preview_load_dialogs: Dict[str, QProgressDialog] = {}
+        self._preview_load_tasks: Dict[str, str] = {}
         self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
         self._pending_directory_refreshes = set()
         self._pending_upload_retry: Optional[tuple[str, str, List[str]]] = None
-        self._task_manager = TaskManager(self)
-        self._task_manager.task_finished.connect(self.on_managed_task_finished)
+        self._directory_load_task_id: Optional[str] = None
+        self._directory_save_task_id: Optional[str] = None
+        self._create_directory_task_id: Optional[str] = None
+        self._create_directory_context: Optional[tuple[str, str]] = None
+        self._upload_task_id: Optional[str] = None
+        self._upload_context: Optional[tuple[str, str]] = None
+        self._task_manager = TaskManager(
+            self,
+            history_limit=50,
+            kind_limits={
+                TaskKind.DIRECTORY_LOAD: 1,
+                TaskKind.DIRECTORY_CREATE: 1,
+                TaskKind.FILE_UPLOAD: 1,
+                TaskKind.FILE_DOWNLOAD: self.config.max_concurrent_file_saves,
+                TaskKind.DIRECTORY_DOWNLOAD: 1,
+                TaskKind.PREVIEW_LOAD: self.config.max_concurrent_preview_loads,
+            },
+        )
+        self._task_manager.task_succeeded.connect(self.on_task_succeeded)
+        self._task_manager.task_failed.connect(self.on_task_failed)
+        self._task_manager.task_cancelled.connect(self.on_task_cancelled)
+        self._task_manager.task_cleaned.connect(self.on_task_cleaned)
         self._task_manager.all_finished.connect(self.on_all_tasks_finished)
         self._closing_after_task_cancel = False
-        self._next_task_id = 0
         self._model_process_timer = QTimer(self)
         self._model_process_timer.setInterval(1000)
         self._model_process_timer.timeout.connect(self.reap_model_preview_processes)
@@ -400,7 +411,15 @@ class MainWindow(QMainWindow):
         self.refresh_action.setShortcut("F5")
         self.refresh_action.triggered.connect(self.refresh_current_directory)
         self.addAction(self.refresh_action)
-        self.statusBar().showMessage("就绪")
+        self._task_center = TaskCenterDock(self._task_manager, self)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._task_center)
+        self._task_center.hide()
+        self._status_controller = TaskStatusController(
+            self._task_manager,
+            self.statusBar(),
+            self._task_center.show_and_raise,
+            self,
+        )
 
         self.load_root_btn.clicked.connect(self.load_root_directory)
         self.refresh_btn.clicked.connect(self.refresh_current_directory)
@@ -488,61 +507,45 @@ class MainWindow(QMainWindow):
             return False
         self.entries = list(cached_entries)
         self.render_entries()
-        self.statusBar().showMessage(f"已从缓存加载 {len(cached_entries)} 条，按 F5 可重新加载")
+        self._status_controller.show_transient(
+            f"已从缓存加载 {len(cached_entries)} 条，按 F5 可重新加载"
+        )
         return True
+
+    def is_task_active(self, task_id: Optional[str]) -> bool:
+        return bool(task_id and self._task_manager.contains(task_id))
 
     def load_directory(self, dir_path: str, force_reload: bool) -> None:
         base_url = self.get_base_url()
         if not base_url:
             QMessageBox.warning(self, "参数错误", "地址不能为空")
             return
-        if self._task_manager.contains(self.DIRECTORY_SAVE_TASK):
-            QMessageBox.information(self, "任务进行中", "当前正在保存到本地，请稍候或先中断。")
-            return
-        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
-            self.statusBar().showMessage("正在加载，请稍候...")
+        if self.is_task_active(self._directory_load_task_id):
+            self._status_controller.show_transient("正在加载，请稍候...")
             return
         self.current_dir = normalize_dir_path(dir_path)
         self.remember_input_histories(include_search=False)
         self.path_label.setText(f"当前位置: {self.current_dir}")
         if not force_reload and self.try_apply_cached_directory(base_url, self.current_dir):
             return
-        self.statusBar().showMessage("正在加载...")
         self.start_directory_load(base_url, self.current_dir)
 
     def start_directory_load(self, base_url: str, dir_path: str) -> None:
         self.set_loading_ui(True)
-        self._loading_dialog = QProgressDialog(
-            "正在重新加载目录，请稍候...",
-            "取消",
-            0,
-            0,
-            self,
-        )
-        self._loading_dialog.setWindowTitle("加载中")
-        self._loading_dialog.setWindowModality(Qt.WindowModality.NonModal)
-        self._loading_dialog.setMinimumDuration(0)
-        self._loading_dialog.setAutoClose(False)
-        self._loading_dialog.setAutoReset(False)
-        self._loading_dialog.show()
-
         worker = DirectoryLoadWorker(
             self.client,
             base_url,
             dir_path,
             self.config.page_limit,
         )
-        worker.progress.connect(self.on_directory_load_progress)
-        worker.finished.connect(self.on_directory_load_finished)
-        worker.cancelled.connect(self.on_directory_load_cancelled)
-        worker.error.connect(self.on_directory_load_failed)
-        self._loading_dialog.canceled.connect(
-            lambda: self._task_manager.cancel(self.DIRECTORY_LOAD_TASK)
-        )
-        self._task_manager.start(
-            self.DIRECTORY_LOAD_TASK,
+        self._directory_load_task_id = self._task_manager.start(
+            TaskSpec(
+                kind=TaskKind.DIRECTORY_LOAD,
+                title="加载目录",
+                detail=dir_path,
+                dedup_key=f"directory-load:{base_url}:{dir_path}",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
         )
 
     def on_directory_load_finished(self, entries: List[Dict[str, Any]]) -> None:
@@ -550,27 +553,19 @@ class MainWindow(QMainWindow):
         cache_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
         self._directory_cache.put(cache_key, list(entries))
         self.render_entries()
-        self.statusBar().showMessage(f"已加载 {len(entries)} 条")
+        self._status_controller.show_transient(f"已加载 {len(entries)} 条")
 
-    def on_directory_load_progress(self, count: int) -> None:
-        if self._loading_dialog is not None:
-            self._loading_dialog.setLabelText(f"正在重新加载目录... 已加载 {count} 条")
-        self.statusBar().showMessage(f"正在加载... 已加载 {count} 条")
-
-    def on_directory_load_failed(self, message: str) -> None:
+    def on_directory_load_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "加载失败", message)
-        self.statusBar().showMessage("加载失败")
+            QMessageBox.critical(self, "加载失败", error.message)
+        self._status_controller.show_transient("加载失败")
 
     def on_directory_load_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage("目录加载已取消")
+            self._status_controller.show_transient("目录加载已取消")
 
     def on_directory_load_thread_cleaned(self) -> None:
-        if self._loading_dialog is not None:
-            self._loading_dialog.close()
-            self._loading_dialog.deleteLater()
-            self._loading_dialog = None
+        self._directory_load_task_id = None
         self.set_loading_ui(False)
         current_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
         if current_key in self._pending_directory_refreshes:
@@ -698,7 +693,7 @@ class MainWindow(QMainWindow):
             or normalize_dir_path(directory) != self.current_dir
         ):
             return
-        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
+        if self.is_task_active(self._directory_load_task_id):
             self._pending_directory_refreshes.add(cache_key)
             return
         QTimer.singleShot(
@@ -707,7 +702,7 @@ class MainWindow(QMainWindow):
         )
 
     def create_remote_directory(self) -> None:
-        if self._task_manager.contains(self.CREATE_DIRECTORY_TASK):
+        if self.is_task_active(self._create_directory_task_id):
             QMessageBox.information(self, "任务进行中", "已有目录创建任务正在执行。")
             return
         base_url = self.get_base_url()
@@ -737,47 +732,22 @@ class MainWindow(QMainWindow):
             return
 
         parent_dir = self.current_dir
-        dialog = QProgressDialog(
-            f"正在创建文件夹...\n{target_path}",
-            "取消",
-            0,
-            0,
-            self,
-        )
-        dialog.setWindowTitle("创建文件夹")
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.show()
-        self._create_directory_dialog = dialog
-
         worker = CreateDirectoryWorker(
             self.client,
             base_url,
             parent_dir,
             target_path,
         )
-        dialog.canceled.connect(
-            lambda: self._task_manager.cancel(self.CREATE_DIRECTORY_TASK)
-        )
-        worker.finished.connect(self.on_create_directory_finished)
-        worker.cancelled.connect(
-            lambda: self.on_create_directory_cancelled(base_url, parent_dir)
-        )
-        worker.error.connect(
-            lambda message: self.on_create_directory_failed(
-                base_url,
-                parent_dir,
-                message,
-            )
-        )
-        self._task_manager.start(
-            self.CREATE_DIRECTORY_TASK,
+        self._create_directory_context = (base_url, parent_dir)
+        self._create_directory_task_id = self._task_manager.start(
+            TaskSpec(
+                kind=TaskKind.DIRECTORY_CREATE,
+                title="创建文件夹",
+                detail=target_path,
+                dedup_key=f"directory-create:{base_url}:{target_path}",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
         )
-        self.statusBar().showMessage(f"正在创建文件夹: {basename(target_path)}")
 
     def on_create_directory_finished(self, result: Dict[str, Any]) -> None:
         base_url = str(result.get("base_url", ""))
@@ -785,26 +755,30 @@ class MainWindow(QMainWindow):
         target_path = str(result.get("target_path", ""))
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage(f"文件夹已创建: {basename(target_path)}")
+            self._status_controller.show_transient(
+                f"文件夹已创建: {basename(target_path)}"
+            )
 
     def on_create_directory_cancelled(self, base_url: str, parent_dir: str) -> None:
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage("目录创建已取消，正在确认远程状态")
+            self._status_controller.show_transient(
+                "目录创建已取消，正在确认远程状态"
+            )
 
     def on_create_directory_failed(
         self,
         base_url: str,
         parent_dir: str,
-        message: str,
+        error: TaskError,
     ) -> None:
         self.invalidate_remote_directory(base_url, parent_dir)
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "创建文件夹失败", message)
-            self.statusBar().showMessage("目录创建失败")
+            QMessageBox.critical(self, "创建文件夹失败", error.message)
+            self._status_controller.show_transient("目录创建失败")
 
     def select_files_to_upload(self) -> None:
-        if self._task_manager.contains(self.UPLOAD_BATCH_TASK):
+        if self.is_task_active(self._upload_task_id):
             QMessageBox.information(
                 self,
                 "上传进行中",
@@ -889,25 +863,9 @@ class MainWindow(QMainWindow):
         base_url: str,
         target_dir: str,
     ) -> None:
-        if self._task_manager.contains(self.UPLOAD_BATCH_TASK):
+        if self.is_task_active(self._upload_task_id):
             return
         total_bytes = sum(item.size for item in items)
-        dialog = QProgressDialog(
-            f"准备上传 {len(items)} 个文件，共 {format_size(total_bytes)}...",
-            "取消",
-            0,
-            100,
-            self,
-        )
-        dialog.setWindowTitle("上传文件")
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.setValue(0)
-        dialog.show()
-        self._upload_dialog = dialog
-
         worker = UploadBatchWorker(
             self.client,
             base_url,
@@ -915,47 +873,15 @@ class MainWindow(QMainWindow):
             items,
             self.config.upload_workers,
         )
-        dialog.canceled.connect(
-            lambda: self._task_manager.cancel(self.UPLOAD_BATCH_TASK)
-        )
-        worker.progress.connect(self.on_upload_progress)
-        worker.finished.connect(self.on_upload_finished)
-        worker.cancelled.connect(
-            lambda: self.on_upload_cancelled(base_url, target_dir)
-        )
-        worker.error.connect(
-            lambda message: self.on_upload_failed(base_url, target_dir, message)
-        )
-        self._task_manager.start(
-            self.UPLOAD_BATCH_TASK,
+        self._upload_context = (base_url, target_dir)
+        self._upload_task_id = self._task_manager.start(
+            TaskSpec(
+                kind=TaskKind.FILE_UPLOAD,
+                title=f"上传 {len(items)} 个文件",
+                detail=f"{target_dir} · {format_size(total_bytes)}",
+                dedup_key="upload-batch",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
-        )
-        self.statusBar().showMessage(f"开始上传 {len(items)} 个文件")
-
-    def on_upload_progress(
-        self,
-        uploaded_bytes: int,
-        total_bytes: int,
-        completed_files: int,
-        total_files: int,
-        current_path: str,
-    ) -> None:
-        if self._upload_dialog is None:
-            return
-        if total_bytes > 0:
-            percent = min(100, int(uploaded_bytes * 100 / total_bytes))
-        else:
-            percent = min(100, int(completed_files * 100 / max(total_files, 1)))
-        self._upload_dialog.setValue(percent)
-        self._upload_dialog.setLabelText(
-            f"正在上传文件...\n"
-            f"文件: {completed_files}/{total_files}\n"
-            f"数据: {format_size(uploaded_bytes)} / {format_size(total_bytes)}\n"
-            f"当前: {basename(current_path)}"
-        )
-        self.statusBar().showMessage(
-            f"上传中... {completed_files}/{total_files}，{percent}%"
         )
 
     def on_upload_finished(self, result: Dict[str, Any]) -> None:
@@ -967,13 +893,10 @@ class MainWindow(QMainWindow):
         self.invalidate_remote_directory(base_url, target_dir)
         if self._closing_after_task_cancel:
             return
-        self.statusBar().showMessage(f"上传完成: {uploaded_files}/{total_files}")
+        self._status_controller.show_transient(
+            f"上传完成: {uploaded_files}/{total_files}"
+        )
         if not failures:
-            QMessageBox.information(
-                self,
-                "上传完成",
-                f"已上传 {uploaded_files}/{total_files} 个文件。",
-            )
             return
 
         details = "\n".join(
@@ -1001,18 +924,23 @@ class MainWindow(QMainWindow):
     def on_upload_cancelled(self, base_url: str, target_dir: str) -> None:
         self.invalidate_remote_directory(base_url, target_dir)
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage("上传已取消，正在确认远程状态")
+            self._status_controller.show_transient(
+                "上传已取消，正在确认远程状态"
+            )
 
     def on_upload_failed(
         self,
         base_url: str,
         target_dir: str,
-        message: str,
+        error: TaskError,
     ) -> None:
+        if isinstance(error.payload, dict):
+            self.on_upload_finished(error.payload)
+            return
         self.invalidate_remote_directory(base_url, target_dir)
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "上传失败", message)
-            self.statusBar().showMessage("上传失败")
+            QMessageBox.critical(self, "上传失败", error.message)
+            self._status_controller.show_transient("上传失败")
 
     def open_entry_details(self, item: QTreeWidgetItem) -> None:
         entry = item.data(2, Qt.ItemDataRole.UserRole)
@@ -1029,10 +957,6 @@ class MainWindow(QMainWindow):
 
     def build_preview_window_key(self, preview_type: str, full_path: str) -> str:
         return f"{preview_type}:{self.get_base_url()}:{full_path}"
-
-    @staticmethod
-    def build_preview_task_key(preview_key: str) -> str:
-        return f"preview-load:{preview_key}"
 
     def activate_preview_window(self, preview_key: str) -> bool:
         window = self._preview_windows.get(preview_key)
@@ -1097,16 +1021,12 @@ class MainWindow(QMainWindow):
             return
         if preview_type == "model" and self.activate_model_preview_process(preview_key):
             return
-        task_key = self.build_preview_task_key(preview_key)
-        if self._task_manager.contains(task_key):
-            dialog = self._preview_load_dialogs.get(preview_key)
-            if dialog is not None:
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
+        existing_task_id = self._preview_load_tasks.get(preview_key)
+        if self.is_task_active(existing_task_id):
+            self._task_center.show_and_raise()
             return
         if (
-            self._task_manager.count("preview-load:")
+            self._task_manager.count(TaskKind.PREVIEW_LOAD)
             >= self.config.max_concurrent_preview_loads
         ):
             QMessageBox.information(
@@ -1137,60 +1057,23 @@ class MainWindow(QMainWindow):
     ) -> None:
         type_labels = {"text": "文本", "image": "图片", "model": "模型"}
         label = type_labels.get(preview_type, "文件")
-        dialog = QProgressDialog(f"正在准备{label}预览...\n{full_path}", "取消", 0, 0, self)
-        dialog.setWindowTitle(f"{label}预览加载中")
-        dialog.setWindowModality(Qt.WindowModality.NonModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.show()
-
         worker = PreviewLoadWorker(self.client, preview_type, base_url, full_path)
-        task_key = self.build_preview_task_key(preview_key)
-        self._preview_load_dialogs[preview_key] = dialog
-
-        dialog.canceled.connect(lambda key=task_key: self._task_manager.cancel(key))
-        dialog.canceled.connect(
-            lambda key=preview_key: self.on_preview_cancel_requested(key)
-        )
-        worker.finished.connect(
-            lambda result, key=preview_key: self.on_preview_load_finished(key, result)
-        )
-        worker.cancelled.connect(
-            lambda key=preview_key: self.on_preview_load_cancelled(key)
-        )
-        worker.error.connect(
-            lambda message, key=preview_key: self.on_preview_load_failed(key, message)
-        )
-        self._task_manager.start(
-            task_key,
+        task_id = self._task_manager.start(
+            TaskSpec(
+                kind=TaskKind.PREVIEW_LOAD,
+                title=f"{label}预览",
+                detail=full_path,
+                dedup_key=f"preview:{preview_key}",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
         )
-        self.statusBar().showMessage(f"正在准备{label}预览: {basename(full_path)}")
-
-    def on_preview_cancel_requested(self, preview_key: str) -> None:
-        dialog = self._preview_load_dialogs.get(preview_key)
-        if dialog is not None:
-            dialog.setLabelText("正在取消预览加载，请稍候...")
+        self._preview_load_tasks[preview_key] = task_id
 
     def on_preview_load_finished(self, preview_key: str, result: Dict[str, Any]) -> None:
         preview_type = str(result.get("preview_type", ""))
         full_path = str(result.get("full_path", ""))
         temp_dir = str(result.get("temp_dir", ""))
         local_path = str(result.get("local_path", ""))
-        task = self._task_manager.get(self.build_preview_task_key(preview_key))
-        dialog = self._preview_load_dialogs.get(preview_key)
-        if (
-            task is not None
-            and (
-                task.worker.is_cancelled()
-                or (dialog is not None and dialog.wasCanceled())
-            )
-        ):
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            return
         if self._closing_after_task_cancel:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1226,7 +1109,9 @@ class MainWindow(QMainWindow):
                 temp_dir = ""
             else:
                 raise RuntimeError(f"不支持的预览类型: {preview_type}")
-            self.statusBar().showMessage(f"已打开预览: {basename(full_path)}")
+            self._status_controller.show_transient(
+                f"已打开预览: {basename(full_path)}"
+            )
         except Exception as e:
             if not self._closing_after_task_cancel:
                 QMessageBox.critical(self, "预览失败", str(e))
@@ -1236,25 +1121,22 @@ class MainWindow(QMainWindow):
 
     def on_preview_load_cancelled(self, preview_key: str) -> None:
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage("预览加载已取消")
+            self._status_controller.show_transient("预览加载已取消")
 
-    def on_preview_load_failed(self, preview_key: str, message: str) -> None:
+    def on_preview_load_failed(self, preview_key: str, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "预览失败", message)
-            self.statusBar().showMessage("预览加载失败")
+            QMessageBox.critical(self, "预览失败", error.message)
+            self._status_controller.show_transient("预览加载失败")
 
     def on_preview_load_thread_cleaned(self, preview_key: str) -> None:
-        dialog = self._preview_load_dialogs.pop(preview_key, None)
-        if dialog is not None:
-            dialog.close()
-            dialog.deleteLater()
+        self._preview_load_tasks.pop(preview_key, None)
 
     def activate_model_preview_process(self, preview_key: str) -> bool:
         record = self._model_preview_processes.get(preview_key)
         if record is None:
             return False
         if record.process.poll() is None:
-            self.statusBar().showMessage("该模型预览窗口已经打开")
+            self._status_controller.show_transient("该模型预览窗口已经打开")
             return True
         self._model_preview_processes.pop(preview_key, None)
         shutil.rmtree(record.temp_dir, ignore_errors=True)
@@ -1286,7 +1168,7 @@ class MainWindow(QMainWindow):
 
     def save_single_file_to_local(self, full_path: str) -> None:
         if (
-            self._task_manager.count("file-save:")
+            self._task_manager.count(TaskKind.FILE_DOWNLOAD)
             >= self.config.max_concurrent_file_saves
         ):
             QMessageBox.information(
@@ -1300,86 +1182,40 @@ class MainWindow(QMainWindow):
         save_path, _ = QFileDialog.getSaveFileName(self, "另存为", default_name, "所有文件 (*)")
         if not save_path:
             return
-        self._next_task_id += 1
-        task_key = f"file-save:{self._next_task_id}"
-        progress = QProgressDialog("正在保存文件...", "中断", 0, 0, self)
-        progress.setWindowTitle("保存中")
-        progress.setWindowModality(Qt.WindowModality.NonModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.show()
-        self._file_save_dialogs[task_key] = progress
-
         worker = FileDownloadWorker(
             self.client,
             self.get_base_url(),
             full_path,
             save_path,
         )
-        progress.canceled.connect(lambda key=task_key: self._task_manager.cancel(key))
-        worker.progress.connect(
-            lambda downloaded, total, key=task_key: self.on_file_save_progress(
-                key,
-                downloaded,
-                total,
-            )
-        )
-        worker.finished.connect(
-            lambda path, key=task_key: self.on_file_save_finished(key, path)
-        )
-        worker.cancelled.connect(
-            lambda key=task_key: self.on_file_save_cancelled(key)
-        )
-        worker.error.connect(
-            lambda message, key=task_key: self.on_file_save_failed(key, message)
-        )
         self._task_manager.start(
-            task_key,
+            TaskSpec(
+                kind=TaskKind.FILE_DOWNLOAD,
+                title=f"保存文件：{basename(full_path)}",
+                detail=save_path,
+                dedup_key=f"file-download:{self.get_base_url()}:{full_path}:{save_path}",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
         )
-        self.statusBar().showMessage(f"正在保存: {basename(full_path)}")
 
-    def on_file_save_progress(
-        self,
-        task_key: str,
-        downloaded: int,
-        total: int,
-    ) -> None:
-        dialog = self._file_save_dialogs.get(task_key)
-        if dialog is None:
-            return
-        if total > 0:
-            percent = min(100, int(downloaded * 100 / total))
-            dialog.setRange(0, 100)
-            dialog.setValue(percent)
-            dialog.setLabelText(
-                f"正在保存文件...\n{format_size(downloaded)} / {format_size(total)}"
-            )
-        else:
-            dialog.setRange(0, 0)
-            dialog.setLabelText(f"正在保存文件...\n已下载 {format_size(downloaded)}")
-
-    def on_file_save_finished(self, task_key: str, save_path: str) -> None:
+    def on_file_save_finished(self, save_path: str) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.information(self, "保存成功", f"文件已保存到:\n{save_path}")
-            self.statusBar().showMessage(f"保存完成: {save_path}")
+            self._status_controller.show_transient(f"保存完成: {save_path}")
 
-    def on_file_save_cancelled(self, task_key: str) -> None:
+    def on_file_save_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            self.statusBar().showMessage("文件保存已中断")
+            self._status_controller.show_transient("文件保存已中断")
 
-    def on_file_save_failed(self, task_key: str, message: str) -> None:
+    def on_file_save_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "保存失败", message)
-            self.statusBar().showMessage("文件保存失败")
+            QMessageBox.critical(self, "保存失败", error.message)
+            self._status_controller.show_transient("文件保存失败")
 
     def save_current_directory_to_local(self) -> None:
-        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
+        if self.is_task_active(self._directory_load_task_id):
             QMessageBox.information(self, "任务进行中", "目录正在加载中，请稍后再保存。")
             return
-        if self._task_manager.contains(self.DIRECTORY_SAVE_TASK):
+        if self.is_task_active(self._directory_save_task_id):
             QMessageBox.information(self, "任务进行中", "已存在保存任务，请先等待完成或中断。")
             return
         base_url = self.get_base_url()
@@ -1390,15 +1226,6 @@ class MainWindow(QMainWindow):
         if not target_dir:
             return
 
-        self.set_loading_ui(True)
-        self._save_dialog = QProgressDialog("准备扫描目录...", "中断", 0, 0, self)
-        self._save_dialog.setWindowTitle("递归保存中")
-        self._save_dialog.setWindowModality(Qt.WindowModality.NonModal)
-        self._save_dialog.setMinimumDuration(0)
-        self._save_dialog.setAutoClose(False)
-        self._save_dialog.setAutoReset(False)
-        self._save_dialog.show()
-
         worker = SaveDirectoryWorker(
             self.client,
             base_url,
@@ -1407,85 +1234,48 @@ class MainWindow(QMainWindow):
             self.config.page_limit,
             self.config.directory_download_workers,
         )
-        worker.progress.connect(self.on_save_progress)
-        worker.finished.connect(self.on_save_finished)
-        worker.cancelled.connect(self.on_save_cancelled)
-        worker.error.connect(self.on_save_failed)
-        self._save_dialog.canceled.connect(
-            lambda: self._task_manager.cancel(self.DIRECTORY_SAVE_TASK)
-        )
-        self._task_manager.start(
-            self.DIRECTORY_SAVE_TASK,
+        self._directory_save_task_id = self._task_manager.start(
+            TaskSpec(
+                kind=TaskKind.DIRECTORY_DOWNLOAD,
+                title=f"保存目录：{basename(self.current_dir)}",
+                detail=target_dir,
+                dedup_key="directory-download",
+            ),
             worker,
-            (worker.finished, worker.cancelled, worker.error),
         )
-        self.statusBar().showMessage("开始递归保存当前目录...")
-
-    def on_save_progress(
-        self, phase: str, scanned_dirs: int, total_files: int, downloaded_files: int, current: str
-    ) -> None:
-        if self._save_dialog is None:
-            return
-        if phase == "scan":
-            self._save_dialog.setRange(0, 0)
-            self._save_dialog.setLabelText(
-                f"正在扫描目录...\n已扫描目录: {scanned_dirs}\n已发现文件: {total_files}\n当前: {current}"
-            )
-            self.statusBar().showMessage(f"扫描中... 目录 {scanned_dirs}，文件 {total_files}")
-            return
-        total = max(total_files, 1)
-        self._save_dialog.setRange(0, total)
-        self._save_dialog.setValue(downloaded_files)
-        self._save_dialog.setLabelText(
-            f"正在下载文件...\n进度: {downloaded_files}/{total_files}\n当前: {current}"
-        )
-        self.statusBar().showMessage(f"下载中... {downloaded_files}/{total_files}")
 
     def on_save_finished(self, result: Dict[str, Any]) -> None:
         total_files = int(result.get("total_files", 0))
         downloaded_files = int(result.get("downloaded_files", 0))
         target_dir = str(result.get("target_dir", ""))
-        if not self._closing_after_task_cancel:
-            QMessageBox.information(
-                self,
-                "保存完成",
-                f"递归保存已完成。\n文件: {downloaded_files}/{total_files}\n目录: {target_dir}",
-            )
-        self.statusBar().showMessage(f"保存完成: {downloaded_files}/{total_files}")
+        self._status_controller.show_transient(
+            f"保存完成: {downloaded_files}/{total_files}"
+        )
         if target_dir and not self._closing_after_task_cancel:
             try:
                 open_path_in_file_explorer(target_dir)
             except Exception as e:
                 QMessageBox.warning(self, "提示", f"保存完成，但自动打开目录失败:\n{e}")
 
-    def on_save_cancelled(self, message: str) -> None:
+    def on_save_cancelled(self) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.information(self, "已中断", message)
-        self.statusBar().showMessage("保存已中断")
+            self._status_controller.show_transient("保存已中断")
 
-    def on_save_failed(self, message: str) -> None:
+    def on_save_failed(self, error: TaskError) -> None:
         if not self._closing_after_task_cancel:
-            QMessageBox.critical(self, "保存失败", message)
-        self.statusBar().showMessage("保存失败")
+            QMessageBox.critical(self, "保存失败", error.message)
+        self._status_controller.show_transient("保存失败")
 
     def on_save_thread_cleaned(self) -> None:
-        if self._save_dialog is not None:
-            self._save_dialog.close()
-            self._save_dialog.deleteLater()
-            self._save_dialog = None
-        self.set_loading_ui(False)
+        self._directory_save_task_id = None
 
     def on_create_directory_thread_cleaned(self) -> None:
-        if self._create_directory_dialog is not None:
-            self._create_directory_dialog.close()
-            self._create_directory_dialog.deleteLater()
-            self._create_directory_dialog = None
+        self._create_directory_task_id = None
+        self._create_directory_context = None
 
     def on_upload_thread_cleaned(self) -> None:
-        if self._upload_dialog is not None:
-            self._upload_dialog.close()
-            self._upload_dialog.deleteLater()
-            self._upload_dialog = None
+        self._upload_task_id = None
+        self._upload_context = None
         retry = self._pending_upload_retry
         self._pending_upload_retry = None
         if retry is None or self._closing_after_task_cancel:
@@ -1502,28 +1292,99 @@ class MainWindow(QMainWindow):
                 lambda: self.start_upload_batch(items, base_url, target_dir),
             )
 
-    def on_managed_task_finished(self, task_key: str) -> None:
-        if task_key == self.DIRECTORY_LOAD_TASK:
+    def preview_key_for_task(self, task_id: str) -> Optional[str]:
+        for preview_key, preview_task_id in self._preview_load_tasks.items():
+            if preview_task_id == task_id:
+                return preview_key
+        return None
+
+    def on_task_succeeded(self, task_id: str, result: Any) -> None:
+        if task_id == self._directory_load_task_id:
+            self.on_directory_load_finished(result)
+            return
+        if task_id == self._directory_save_task_id:
+            self.on_save_finished(result)
+            return
+        if task_id == self._create_directory_task_id:
+            self.on_create_directory_finished(result)
+            return
+        if task_id == self._upload_task_id:
+            self.on_upload_finished(result)
+            return
+        preview_key = self.preview_key_for_task(task_id)
+        if preview_key is not None:
+            self.on_preview_load_finished(preview_key, result)
+            return
+        snapshot = self._task_manager.get(task_id)
+        if snapshot is not None and snapshot.spec.kind == TaskKind.FILE_DOWNLOAD:
+            self.on_file_save_finished(str(result))
+
+    def on_task_failed(self, task_id: str, error: TaskError) -> None:
+        if task_id == self._directory_load_task_id:
+            self.on_directory_load_failed(error)
+            return
+        if task_id == self._directory_save_task_id:
+            self.on_save_failed(error)
+            return
+        if task_id == self._create_directory_task_id:
+            if self._create_directory_context is not None:
+                self.on_create_directory_failed(
+                    *self._create_directory_context,
+                    error,
+                )
+            return
+        if task_id == self._upload_task_id:
+            if self._upload_context is not None:
+                self.on_upload_failed(*self._upload_context, error)
+            return
+        preview_key = self.preview_key_for_task(task_id)
+        if preview_key is not None:
+            self.on_preview_load_failed(preview_key, error)
+            return
+        snapshot = self._task_manager.get(task_id)
+        if snapshot is not None and snapshot.spec.kind == TaskKind.FILE_DOWNLOAD:
+            self.on_file_save_failed(error)
+
+    def on_task_cancelled(self, task_id: str) -> None:
+        if task_id == self._directory_load_task_id:
+            self.on_directory_load_cancelled()
+            return
+        if task_id == self._directory_save_task_id:
+            self.on_save_cancelled()
+            return
+        if task_id == self._create_directory_task_id:
+            if self._create_directory_context is not None:
+                self.on_create_directory_cancelled(*self._create_directory_context)
+            return
+        if task_id == self._upload_task_id:
+            if self._upload_context is not None:
+                self.on_upload_cancelled(*self._upload_context)
+            return
+        preview_key = self.preview_key_for_task(task_id)
+        if preview_key is not None:
+            self.on_preview_load_cancelled(preview_key)
+            return
+        snapshot = self._task_manager.get(task_id)
+        if snapshot is not None and snapshot.spec.kind == TaskKind.FILE_DOWNLOAD:
+            self.on_file_save_cancelled()
+
+    def on_task_cleaned(self, task_id: str) -> None:
+        if task_id == self._directory_load_task_id:
             self.on_directory_load_thread_cleaned()
             return
-        if task_key == self.DIRECTORY_SAVE_TASK:
+        if task_id == self._directory_save_task_id:
             self.on_save_thread_cleaned()
             return
-        if task_key == self.CREATE_DIRECTORY_TASK:
+        if task_id == self._create_directory_task_id:
             self.on_create_directory_thread_cleaned()
             return
-        if task_key == self.UPLOAD_BATCH_TASK:
+        if task_id == self._upload_task_id:
             self.on_upload_thread_cleaned()
             return
-        if task_key.startswith("preview-load:"):
-            preview_key = task_key[len("preview-load:") :]
-            self.on_preview_load_thread_cleaned(preview_key)
-            return
-        if task_key.startswith("file-save:"):
-            dialog = self._file_save_dialogs.pop(task_key, None)
-            if dialog is not None:
-                dialog.close()
-                dialog.deleteLater()
+        for preview_key, preview_task_id in list(self._preview_load_tasks.items()):
+            if task_id == preview_task_id:
+                self.on_preview_load_thread_cleaned(preview_key)
+                return
 
     def on_all_tasks_finished(self) -> None:
         if self._closing_after_task_cancel:
@@ -1536,26 +1397,11 @@ class MainWindow(QMainWindow):
         if self._task_manager.has_active_tasks():
             self._closing_after_task_cancel = True
             self.setEnabled(False)
-            self.statusBar().showMessage("正在取消后台任务并清理临时资源...")
+            self._status_controller.show_transient(
+                "正在取消后台任务并清理临时资源...",
+                timeout_ms=0,
+            )
             self._task_manager.cancel_all()
-            for dialog in list(self._preview_load_dialogs.values()):
-                dialog.setLabelText("正在取消预览加载，请稍候...")
-                dialog.hide()
-            for dialog in list(self._file_save_dialogs.values()):
-                dialog.setLabelText("正在取消文件保存，请稍候...")
-                dialog.hide()
-            if self._loading_dialog is not None:
-                self._loading_dialog.setLabelText("正在取消目录加载，请稍候...")
-                self._loading_dialog.hide()
-            if self._save_dialog is not None:
-                self._save_dialog.setLabelText("正在取消目录保存，请稍候...")
-                self._save_dialog.hide()
-            if self._create_directory_dialog is not None:
-                self._create_directory_dialog.setLabelText("正在取消目录创建，请稍候...")
-                self._create_directory_dialog.hide()
-            if self._upload_dialog is not None:
-                self._upload_dialog.setLabelText("正在取消上传，请稍候...")
-                self._upload_dialog.hide()
             event.ignore()
             return
 

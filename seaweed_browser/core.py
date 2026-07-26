@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000

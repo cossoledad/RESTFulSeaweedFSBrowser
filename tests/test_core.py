@@ -27,7 +27,11 @@ class CoreTests(unittest.TestCase):
     def test_safe_local_path_accepts_child(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             target = safe_local_path(root, "nested/file.bin")
-            self.assertEqual(target, os.path.join(root, "nested", "file.bin"))
+            expected = os.path.join(root, "nested", "file.bin")
+            self.assertEqual(
+                os.path.normcase(os.path.realpath(target)),
+                os.path.normcase(os.path.realpath(expected)),
+            )
 
     def test_safe_local_path_rejects_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as root:

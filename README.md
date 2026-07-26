@@ -2,7 +2,7 @@
 
 用于浏览 SeaweedFS Filer 中的文件与目录。
 
-当前版本：`1.0.10`
+当前版本：`1.0.11`
 
 ## Windows 下载
 
@@ -33,7 +33,9 @@
 - 目录加载、文件保存、递归保存和预览任务使用统一的后台任务生命周期，支持安全取消和退出回收
 - 单文件保存采用后台下载和临时文件原子替换，失败或取消不会覆盖已有文件
 - 对远端文件路径进行 URL 编码，对递归保存目标进行路径越界保护
-- 目录缓存：已进入过的目录优先使用缓存，点击“刷新当前目录”或按 `F5` 才重新加载
+- 目录缓存：最多保留 32 个最近访问目录，点击“刷新当前目录”或按 `F5` 可重新加载
+- 递归保存默认并发下载 4 个文件，提高大量小文件的保存吞吐
+- 预览准备和单文件保存分别限制为最多 3 个并发任务，避免无界创建后台线程
 
 ## 项目结构
 
@@ -41,6 +43,8 @@
 - `seaweed_browser/core.py`：版本、配置、路径和格式化规则
 - `seaweed_browser/client.py`：SeaweedFS HTTP 访问与原子下载
 - `seaweed_browser/tasks.py`：统一任务管理器及后台 Worker
+- `seaweed_browser/cache.py`：有界 LRU 缓存
+- `seaweed_browser/downloads.py`：固定并发批量下载调度
 - `seaweed_browser/model_files.py`：GLB/GLTF 格式及外部资源解析
 - `seaweed_browser/widgets.py`：文本、图片和详细信息预览控件
 - `tests/`：不依赖图形环境的核心单元测试
@@ -62,9 +66,16 @@ Windows 下默认保存在：
 {
   "base_url": "http://10.1.23.81:38888",
   "root_dir": "/buckets/cax-dev/files/",
-  "page_limit": 1000
+  "page_limit": 1000,
+  "directory_cache_max_entries": 32,
+  "directory_download_workers": 4,
+  "max_concurrent_preview_loads": 3,
+  "max_concurrent_file_saves": 3
 }
 ```
+
+为避免配置错误耗尽资源，目录缓存最多允许 256 项，递归下载线程最多 16 个，
+预览准备和单文件保存任务上限最多 16 个。
 
 ## 运行
 

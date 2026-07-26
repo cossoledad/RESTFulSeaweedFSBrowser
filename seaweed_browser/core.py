@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 DEFAULT_BASE_URL = "http://10.1.23.81:38888"
 DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
 PAGE_LIMIT = 1000
@@ -18,6 +18,13 @@ GO_MODE_DIR_BIT = 0x80000000
 MAX_PAGES = 10000
 DOWNLOAD_CHUNK_SIZE = 65536
 MAX_HISTORY = 100
+DIRECTORY_CACHE_MAX_ENTRIES = 32
+DIRECTORY_DOWNLOAD_WORKERS = 4
+MAX_CONCURRENT_PREVIEW_LOADS = 3
+MAX_CONCURRENT_FILE_SAVES = 3
+DIRECTORY_CACHE_MAX_LIMIT = 256
+DIRECTORY_DOWNLOAD_WORKERS_LIMIT = 16
+CONCURRENT_TASK_LIMIT = 16
 SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 
@@ -28,6 +35,10 @@ def sanitize_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def sanitize_bounded_int(value: Any, default: int, maximum: int) -> int:
+    return min(sanitize_positive_int(value, default), maximum)
 
 
 def get_config_path() -> str:
@@ -44,6 +55,10 @@ class AppConfig:
     base_url: str = DEFAULT_BASE_URL
     root_dir: str = DEFAULT_ROOT_DIR
     page_limit: int = PAGE_LIMIT
+    directory_cache_max_entries: int = DIRECTORY_CACHE_MAX_ENTRIES
+    directory_download_workers: int = DIRECTORY_DOWNLOAD_WORKERS
+    max_concurrent_preview_loads: int = MAX_CONCURRENT_PREVIEW_LOADS
+    max_concurrent_file_saves: int = MAX_CONCURRENT_FILE_SAVES
     base_url_history: List[str] = field(default_factory=list)
     root_dir_history: List[str] = field(default_factory=list)
     search_history: List[str] = field(default_factory=list)
@@ -63,6 +78,29 @@ def load_config() -> AppConfig:
             base_url=str(raw.get("base_url", DEFAULT_BASE_URL)),
             root_dir=str(raw.get("root_dir", DEFAULT_ROOT_DIR)),
             page_limit=sanitize_positive_int(raw.get("page_limit", PAGE_LIMIT), PAGE_LIMIT),
+            directory_cache_max_entries=sanitize_bounded_int(
+                raw.get("directory_cache_max_entries", DIRECTORY_CACHE_MAX_ENTRIES),
+                DIRECTORY_CACHE_MAX_ENTRIES,
+                DIRECTORY_CACHE_MAX_LIMIT,
+            ),
+            directory_download_workers=sanitize_bounded_int(
+                raw.get("directory_download_workers", DIRECTORY_DOWNLOAD_WORKERS),
+                DIRECTORY_DOWNLOAD_WORKERS,
+                DIRECTORY_DOWNLOAD_WORKERS_LIMIT,
+            ),
+            max_concurrent_preview_loads=sanitize_bounded_int(
+                raw.get(
+                    "max_concurrent_preview_loads",
+                    MAX_CONCURRENT_PREVIEW_LOADS,
+                ),
+                MAX_CONCURRENT_PREVIEW_LOADS,
+                CONCURRENT_TASK_LIMIT,
+            ),
+            max_concurrent_file_saves=sanitize_bounded_int(
+                raw.get("max_concurrent_file_saves", MAX_CONCURRENT_FILE_SAVES),
+                MAX_CONCURRENT_FILE_SAVES,
+                CONCURRENT_TASK_LIMIT,
+            ),
             base_url_history=[str(x) for x in base_hist_raw if isinstance(x, str)],
             root_dir_history=[str(x) for x in root_hist_raw if isinstance(x, str)],
             search_history=[str(x) for x in search_hist_raw if isinstance(x, str)],
@@ -77,6 +115,26 @@ def save_config(cfg: AppConfig) -> None:
         "base_url": cfg.base_url,
         "root_dir": cfg.root_dir,
         "page_limit": sanitize_positive_int(cfg.page_limit, PAGE_LIMIT),
+        "directory_cache_max_entries": sanitize_bounded_int(
+            cfg.directory_cache_max_entries,
+            DIRECTORY_CACHE_MAX_ENTRIES,
+            DIRECTORY_CACHE_MAX_LIMIT,
+        ),
+        "directory_download_workers": sanitize_bounded_int(
+            cfg.directory_download_workers,
+            DIRECTORY_DOWNLOAD_WORKERS,
+            DIRECTORY_DOWNLOAD_WORKERS_LIMIT,
+        ),
+        "max_concurrent_preview_loads": sanitize_bounded_int(
+            cfg.max_concurrent_preview_loads,
+            MAX_CONCURRENT_PREVIEW_LOADS,
+            CONCURRENT_TASK_LIMIT,
+        ),
+        "max_concurrent_file_saves": sanitize_bounded_int(
+            cfg.max_concurrent_file_saves,
+            MAX_CONCURRENT_FILE_SAVES,
+            CONCURRENT_TASK_LIMIT,
+        ),
         "base_url_history": cfg.base_url_history[:MAX_HISTORY],
         "root_dir_history": cfg.root_dir_history[:MAX_HISTORY],
         "search_history": cfg.search_history[:MAX_HISTORY],

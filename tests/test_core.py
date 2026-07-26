@@ -9,6 +9,7 @@ from seaweed_browser.core import (
     join_url,
     load_config,
     safe_local_path,
+    sanitize_bounded_int,
     save_config,
 )
 
@@ -32,6 +33,12 @@ class CoreTests(unittest.TestCase):
                 os.path.normcase(os.path.realpath(target)),
                 os.path.normcase(os.path.realpath(expected)),
             )
+
+    def test_sanitize_bounded_int_uses_safe_range(self) -> None:
+        self.assertEqual(sanitize_bounded_int(4, 2, 16), 4)
+        self.assertEqual(sanitize_bounded_int(1000, 2, 16), 16)
+        self.assertEqual(sanitize_bounded_int(0, 2, 16), 2)
+        self.assertEqual(sanitize_bounded_int("invalid", 2, 16), 2)
 
     def test_safe_local_path_rejects_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -61,6 +68,10 @@ class CoreTests(unittest.TestCase):
                     base_url="http://localhost:8888",
                     root_dir="/buckets/test/",
                     page_limit=250,
+                    directory_cache_max_entries=8,
+                    directory_download_workers=2,
+                    max_concurrent_preview_loads=2,
+                    max_concurrent_file_saves=1,
                     base_url_history=["http://localhost:8888"],
                 )
                 save_config(config)
@@ -69,6 +80,10 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(loaded.base_url, config.base_url)
                 self.assertEqual(loaded.root_dir, config.root_dir)
                 self.assertEqual(loaded.page_limit, 250)
+                self.assertEqual(loaded.directory_cache_max_entries, 8)
+                self.assertEqual(loaded.directory_download_workers, 2)
+                self.assertEqual(loaded.max_concurrent_preview_loads, 2)
+                self.assertEqual(loaded.max_concurrent_file_saves, 1)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from seaweed_browser.cache import LruCache
 from seaweed_browser.client import SeaweedClient
 from seaweed_browser.core import (
     APP_NAME,
@@ -286,7 +287,9 @@ class MainWindow(QMainWindow):
         self.config = load_config()
         self.current_dir = normalize_dir_path(self.config.root_dir)
         self.entries: List[Dict[str, Any]] = []
-        self._directory_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._directory_cache: LruCache[str, List[Dict[str, Any]]] = LruCache(
+            self.config.directory_cache_max_entries
+        )
         self._loading_dialog: Optional[QProgressDialog] = None
         self._save_dialog: Optional[QProgressDialog] = None
         self._file_save_dialogs: Dict[str, QProgressDialog] = {}
@@ -526,7 +529,7 @@ class MainWindow(QMainWindow):
     def on_directory_load_finished(self, entries: List[Dict[str, Any]]) -> None:
         self.entries = entries
         cache_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
-        self._directory_cache[cache_key] = list(entries)
+        self._directory_cache.put(cache_key, list(entries))
         self.render_entries()
         self.statusBar().showMessage(f"已加载 {len(entries)} 条")
 
@@ -735,6 +738,17 @@ class MainWindow(QMainWindow):
                 dialog.raise_()
                 dialog.activateWindow()
             return
+        if (
+            self._task_manager.count("preview-load:")
+            >= self.config.max_concurrent_preview_loads
+        ):
+            QMessageBox.information(
+                self,
+                "预览任务较多",
+                f"最多同时准备 {self.config.max_concurrent_preview_loads} 个预览，"
+                "请等待当前任务完成或先取消其中一个。",
+            )
+            return
         if preview_type == "model":
             try:
                 import f3d  # noqa: F401
@@ -904,6 +918,17 @@ class MainWindow(QMainWindow):
         self._model_preview_processes.clear()
 
     def save_single_file_to_local(self, full_path: str) -> None:
+        if (
+            self._task_manager.count("file-save:")
+            >= self.config.max_concurrent_file_saves
+        ):
+            QMessageBox.information(
+                self,
+                "保存任务较多",
+                f"最多同时保存 {self.config.max_concurrent_file_saves} 个文件，"
+                "请等待当前任务完成或先取消其中一个。",
+            )
+            return
         default_name = basename(full_path)
         save_path, _ = QFileDialog.getSaveFileName(self, "另存为", default_name, "所有文件 (*)")
         if not save_path:
@@ -1013,6 +1038,7 @@ class MainWindow(QMainWindow):
             self.current_dir,
             target_dir,
             self.config.page_limit,
+            self.config.directory_download_workers,
         )
         worker.progress.connect(self.on_save_progress)
         worker.finished.connect(self.on_save_finished)

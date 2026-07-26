@@ -7,9 +7,10 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "SeaweedFSBrowser"
 $MainPy = "main.py"
-$VersionMatch = Select-String -Path $MainPy -Pattern '^APP_VERSION = "([^"]+)"$'
+$VersionFile = "seaweed_browser/core.py"
+$VersionMatch = Select-String -Path $VersionFile -Pattern '^APP_VERSION = "([^"]+)"$'
 if (-not $VersionMatch) {
-    throw "未能从 $MainPy 解析 APP_VERSION"
+    throw "未能从 $VersionFile 解析 APP_VERSION"
 }
 $Version = $VersionMatch.Matches[0].Groups[1].Value
 $PackageBaseName = "$AppName-v$Version-windows-x64-$Mode"

@@ -1,30 +1,22 @@
 import json
 import os
-import posixpath
 import random
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 # 减少 Windows 下字体探测产生的大量告警输出。
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
-from PySide6.QtCore import QObject, QPoint, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QFontDatabase, QIcon, QPixmap
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -33,127 +25,57 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
-    QPlainTextEdit,
-    QScrollArea,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from seaweed_browser.client import SeaweedClient
+from seaweed_browser.core import (
+    APP_NAME,
+    APP_VERSION,
+    MAX_HISTORY,
+    SUPPORTED_F3D_MODEL_EXTENSIONS,
+    SUPPORTED_IMAGE_EXTENSIONS,
+    basename,
+    format_size,
+    format_time,
+    get_config_path,
+    get_path_extension,
+    is_directory,
+    load_config,
+    normalize_base_url,
+    normalize_dir_path,
+    parse_mode_value,
+    parse_time_sort_value,
+    sanitize_positive_int,
+    save_config,
+    update_history,
+)
+from seaweed_browser.tasks import (
+    DirectoryLoadWorker,
+    FileDownloadWorker,
+    PreviewLoadWorker,
+    SaveDirectoryWorker,
+    TaskManager,
+)
+from seaweed_browser.resources import (
+    get_app_window_icon,
+    get_base_dir,
+    get_windows_icon_path,
+    is_bundled_app,
+)
+from seaweed_browser.widgets import (
+    EntryDetailDialog,
+    ImagePreviewDialog,
+    PreviewDialog,
+    SortableTreeWidgetItem,
+)
 
-APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.9"
-DEFAULT_BASE_URL = "http://10.1.23.81:38888"
-DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
-PAGE_LIMIT = 1000
-PREVIEW_MAX_BYTES = 262144
-GO_MODE_DIR_BIT = 0x80000000
-MAX_PAGES = 10000
-DOWNLOAD_CHUNK_SIZE = 65536
-MAX_HISTORY = 100
-SUPPORTED_F3D_MODEL_EXTENSIONS = {".glb", ".gltf"}
-SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+
 WINDOW_ICON_HANDLES: List[int] = []
 F3D_RUNTIME_DLL_NAMES = ["f3d.dll", "vcruntime140.dll", "zlib.dll"]
-
-
-def sanitize_positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def get_config_path() -> str:
-    appdata = os.getenv("APPDATA")
-    if not appdata:
-        appdata = os.path.join(os.path.expanduser("~"), ".config")
-    config_dir = os.path.join(appdata, APP_NAME)
-    os.makedirs(config_dir, exist_ok=True)
-    return os.path.join(config_dir, "config.json")
-
-
-def is_bundled_app() -> bool:
-    """Return whether the application is running from a packaged executable."""
-    return bool(getattr(sys, "frozen", False) or "__compiled__" in globals())
-
-
-def get_base_dir() -> str:
-    # __file__ points at the standalone directory for Nuitka and at the
-    # extraction directory for onefile builds. Keep sys._MEIPASS compatibility
-    # for other packagers without relying on sys.frozen for Nuitka.
-    pyinstaller_base_dir = getattr(sys, "_MEIPASS", "")
-    if pyinstaller_base_dir:
-        return os.path.abspath(pyinstaller_base_dir)
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def get_resource_path(relative_path: str) -> str:
-    return os.path.join(get_base_dir(), relative_path)
-
-
-@dataclass
-class AppConfig:
-    base_url: str = DEFAULT_BASE_URL
-    root_dir: str = DEFAULT_ROOT_DIR
-    page_limit: int = PAGE_LIMIT
-    base_url_history: List[str] = None
-    root_dir_history: List[str] = None
-    search_history: List[str] = None
-
-    def __post_init__(self):
-        if self.base_url_history is None:
-            self.base_url_history = []
-        if self.root_dir_history is None:
-            self.root_dir_history = []
-        if self.search_history is None:
-            self.search_history = []
-
-
-def load_config() -> AppConfig:
-    path = get_config_path()
-    if not os.path.exists(path):
-        return AppConfig()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        base_hist_raw = raw.get("base_url_history", [])
-        root_hist_raw = raw.get("root_dir_history", [])
-        search_hist_raw = raw.get("search_history", [])
-        return AppConfig(
-            base_url=str(raw.get("base_url", DEFAULT_BASE_URL)),
-            root_dir=str(raw.get("root_dir", DEFAULT_ROOT_DIR)),
-            page_limit=sanitize_positive_int(raw.get("page_limit", PAGE_LIMIT), PAGE_LIMIT),
-            base_url_history=[str(x) for x in base_hist_raw if isinstance(x, str)],
-            root_dir_history=[str(x) for x in root_hist_raw if isinstance(x, str)],
-            search_history=[str(x) for x in search_hist_raw if isinstance(x, str)],
-        )
-    except Exception:
-        return AppConfig()
-
-
-def save_config(cfg: AppConfig) -> None:
-    path = get_config_path()
-    data = {
-        "base_url": cfg.base_url,
-        "root_dir": cfg.root_dir,
-        "page_limit": sanitize_positive_int(cfg.page_limit, PAGE_LIMIT),
-        "base_url_history": cfg.base_url_history[:MAX_HISTORY],
-        "root_dir_history": cfg.root_dir_history[:MAX_HISTORY],
-        "search_history": cfg.search_history[:MAX_HISTORY],
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def update_history(history: List[str], value: str) -> List[str]:
-    v = value.strip()
-    if not v:
-        return history[:MAX_HISTORY]
-    new_items = [v] + [x for x in history if x != v]
-    return new_items[:MAX_HISTORY]
 
 
 def open_path_in_file_explorer(path: str) -> None:
@@ -169,17 +91,6 @@ def get_preview_runtime_args() -> List[str]:
     if is_bundled_app():
         return [sys.executable]
     return [sys.executable, os.path.abspath(__file__)]
-
-
-def get_app_window_icon() -> QIcon:
-    return QIcon(get_resource_path(os.path.join("resource", "seaweedfs.png")))
-
-
-def get_windows_icon_path() -> str:
-    ico_path = get_resource_path(os.path.join("resource", "seaweedfs.ico"))
-    if os.path.exists(ico_path):
-        return ico_path
-    return ""
 
 
 def ensure_f3d_runtime_layout() -> None:
@@ -229,243 +140,6 @@ def load_windows_app_icon_handle() -> int:
     return int(user32.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE) or 0)
 
 
-def normalize_base_url(base_url: str) -> str:
-    return base_url.strip().rstrip("/")
-
-
-def normalize_dir_path(path: str) -> str:
-    if not path:
-        return "/"
-    cleaned = path.strip()
-    if not cleaned.startswith("/"):
-        cleaned = "/" + cleaned
-    return cleaned
-
-
-def join_url(base_url: str, full_path: str) -> str:
-    return normalize_base_url(base_url) + normalize_dir_path(full_path)
-
-
-def basename(path: str) -> str:
-    stripped = path.rstrip("/")
-    if not stripped:
-        return "/"
-    name = stripped.split("/")[-1]
-    return name or "/"
-
-
-def get_path_extension(path: str) -> str:
-    _, ext = os.path.splitext(path)
-    return ext.lower()
-
-
-def replace_extension(path: str, new_extension: str) -> str:
-    base, _ = os.path.splitext(path)
-    return base + new_extension
-
-
-def is_external_resource_uri(uri: str) -> bool:
-    parsed = urllib.parse.urlparse(uri)
-    return bool(parsed.scheme) and parsed.scheme.lower() not in {"data"}
-
-
-def normalize_relative_resource_path(uri: str) -> str:
-    normalized = posixpath.normpath(uri.replace("\\", "/"))
-    if normalized in {"", "."}:
-        raise ValueError("资源路径为空")
-    if normalized.startswith("/") or normalized.startswith("../") or normalized == "..":
-        raise ValueError(f"暂不支持越级资源路径: {uri}")
-    return normalized
-
-
-def sniff_model_format(local_file_path: str) -> str:
-    with open(local_file_path, "rb") as f:
-        head = f.read(64)
-    if len(head) >= 4 and head[:4] == b"glTF":
-        return "glb"
-    text_head = head.lstrip()
-    if text_head.startswith(b"{") or text_head.startswith(b"["):
-        return "gltf"
-    return "unknown"
-
-
-def collect_gltf_resource_paths(gltf_file_path: str) -> List[str]:
-    with open(gltf_file_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    resource_paths: List[str] = []
-    for key in ("buffers", "images"):
-        items = payload.get(key)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            uri = item.get("uri")
-            if not isinstance(uri, str):
-                continue
-            stripped = uri.strip()
-            if not stripped or stripped.startswith("data:") or is_external_resource_uri(stripped):
-                continue
-            resource_paths.append(normalize_relative_resource_path(stripped))
-    seen = set()
-    ordered_paths: List[str] = []
-    for resource_path in resource_paths:
-        if resource_path in seen:
-            continue
-        seen.add(resource_path)
-        ordered_paths.append(resource_path)
-    return ordered_paths
-
-
-def format_time(value: Any) -> str:
-    if value is None or value == "":
-        return ""
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return ""
-        try:
-            # SeaweedFS 常见格式：2026-01-29T02:55:32Z
-            if s.endswith("Z"):
-                dt = datetime.fromisoformat(s[:-1]).replace(tzinfo=timezone.utc)
-            else:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            return s
-    try:
-        ivalue = int(value)
-        # 兼容纳秒时间戳
-        if ivalue > 10**12:
-            ivalue = ivalue // 10**9
-        return datetime.fromtimestamp(ivalue).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return ""
-
-
-def parse_time_sort_value(value: Any) -> int:
-    if value is None or value == "":
-        return 0
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return 0
-        try:
-            if s.endswith("Z"):
-                dt = datetime.fromisoformat(s[:-1]).replace(tzinfo=timezone.utc)
-            else:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp())
-        except Exception:
-            return sanitize_positive_int(s, 0)
-    ivalue = sanitize_positive_int(value, 0)
-    if ivalue > 10**12:
-        ivalue = ivalue // 10**9
-    return ivalue
-
-
-def format_size(size: Any) -> str:
-    if size is None or size == "":
-        return ""
-    try:
-        n = int(size)
-    except Exception:
-        return str(size)
-    units = ["B", "KB", "MB", "GB", "TB"]
-    value = float(n)
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{n} B"
-
-
-def parse_mode_value(mode: Any) -> Optional[int]:
-    if isinstance(mode, int):
-        return mode
-    if isinstance(mode, str):
-        value = mode.strip()
-        if not value:
-            return None
-        try:
-            return int(value, 0)
-        except ValueError:
-            if value.isdigit():
-                return int(value)
-    return None
-
-
-def is_directory(entry: Dict[str, Any]) -> bool:
-    # SeaweedFS/Filer 的目录位通常来自 Go 的 os.FileMode (ModeDir = 1<<31)。
-    mode = parse_mode_value(entry.get("Mode"))
-    if mode is not None:
-        if mode & GO_MODE_DIR_BIT:
-            return True
-        if mode & 0o040000:
-            return True
-    for key in ("IsDirectory", "isDirectory", "is_dir", "dir"):
-        value = entry.get(key)
-        if isinstance(value, bool) and value:
-            return True
-    mime = str(entry.get("Mime", ""))
-    if mime == "inode/directory":
-        return True
-    full_path = str(entry.get("FullPath", ""))
-    if full_path.endswith("/"):
-        return True
-    return False
-
-
-class SortableTreeWidgetItem(QTreeWidgetItem):
-    def __lt__(self, other: "QTreeWidgetItem") -> bool:
-        tree = self.treeWidget()
-        if tree is None:
-            return super().__lt__(other)
-        column = tree.sortColumn()
-        left = self.data(column, Qt.ItemDataRole.UserRole + 1)
-        right = other.data(column, Qt.ItemDataRole.UserRole + 1)
-        if left is None or right is None:
-            return super().__lt__(other)
-        return left < right
-
-
-def http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if params:
-        query = urllib.parse.urlencode(params)
-        final_url = f"{url}?{query}"
-    else:
-        final_url = url
-    req = urllib.request.Request(final_url, method="GET")
-    req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read()
-    return json.loads(raw.decode("utf-8"))
-
-
-def http_get_bytes(
-    url: str,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> bytes:
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        chunks: List[bytes] = []
-        remaining = PREVIEW_MAX_BYTES
-        while remaining > 0:
-            if cancel_check is not None and cancel_check():
-                raise RuntimeError("下载已取消")
-            chunk = resp.read(min(DOWNLOAD_CHUNK_SIZE, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
 
 
 def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
@@ -592,560 +266,16 @@ def check_f3d_runtime() -> int:
     return 0
 
 
-class SeaweedClient:
-    def list_dir(
-        self,
-        base_url: str,
-        dir_path: str,
-        page_limit: int,
-        on_progress: Optional[Callable[[int], None]] = None,
-    ) -> List[Dict[str, Any]]:
-        url = join_url(base_url, dir_path)
-        all_entries: List[Dict[str, Any]] = []
-        last_file_name = ""
-        seen_cursors = set()
-        page_count = 0
-        effective_page_limit = sanitize_positive_int(page_limit, PAGE_LIMIT)
-        while True:
-            page_count += 1
-            if page_count > MAX_PAGES:
-                raise RuntimeError("分页次数过多，已中断加载（可能是分页游标无效）")
-            payload = http_get_json(
-                url,
-                params={"limit": effective_page_limit, "lastFileName": last_file_name},
-            )
-            entries = payload.get("Entries") or []
-            if not entries:
-                break
-            all_entries.extend(entries)
-            if on_progress is not None:
-                on_progress(len(all_entries))
-            payload_cursor = payload.get("LastFileName")
-            if isinstance(payload_cursor, str) and payload_cursor.strip():
-                next_cursor = payload_cursor.strip()
-            else:
-                last_path = str(entries[-1].get("FullPath", ""))
-                next_cursor = basename(last_path)
-            # 保护逻辑：如果游标不变化，说明服务端一直返回同一页，避免死循环。
-            if next_cursor == last_file_name or next_cursor in seen_cursors:
-                break
-            seen_cursors.add(next_cursor)
-            last_file_name = next_cursor
-            if payload.get("ShouldDisplayLoadMore") is False:
-                break
-            if len(entries) < effective_page_limit:
-                break
-        return all_entries
-
-    def preview_file(
-        self,
-        base_url: str,
-        full_path: str,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> str:
-        url = join_url(base_url, full_path)
-        data = http_get_bytes(url, cancel_check=cancel_check)
-        return data.decode("utf-8", errors="replace")
-
-    def download_file_to_local(
-        self,
-        base_url: str,
-        full_path: str,
-        local_file_path: str,
-        cancel_check: Optional[Callable[[], bool]] = None,
-    ) -> None:
-        url = join_url(base_url, full_path)
-        req = urllib.request.Request(url, method="GET")
-        parent_dir = os.path.dirname(local_file_path)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            with open(local_file_path, "wb") as f:
-                while True:
-                    if cancel_check is not None and cancel_check():
-                        raise RuntimeError("下载已取消")
-                    chunk = resp.read(DOWNLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-
-
-class DirectoryLoadWorker(QObject):
-    finished = Signal(list)
-    error = Signal(str)
-    progress = Signal(int)
-
-    def __init__(self, client: SeaweedClient, base_url: str, dir_path: str, page_limit: int):
-        super().__init__()
-        self.client = client
-        self.base_url = base_url
-        self.dir_path = dir_path
-        self.page_limit = page_limit
-
-    def run(self) -> None:
-        try:
-            entries = self.client.list_dir(
-                self.base_url,
-                self.dir_path,
-                self.page_limit,
-                on_progress=self.progress.emit,
-            )
-            self.finished.emit(entries)
-        except urllib.error.HTTPError as e:
-            self.error.emit(f"HTTP 错误: {e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            self.error.emit(f"网络错误: {e.reason}")
-        except Exception as e:
-            self.error.emit(f"加载异常: {e}")
-
-
-class PreviewLoadWorker(QObject):
-    finished = Signal(dict)
-    cancelled = Signal()
-    error = Signal(str)
-
-    def __init__(
-        self,
-        client: SeaweedClient,
-        preview_type: str,
-        base_url: str,
-        full_path: str,
-    ):
-        super().__init__()
-        self.client = client
-        self.preview_type = preview_type
-        self.base_url = base_url
-        self.full_path = full_path
-        self._cancelled = threading.Event()
-
-    def request_cancel(self) -> None:
-        self._cancelled.set()
-
-    def is_cancelled(self) -> bool:
-        return self._cancelled.is_set()
-
-    def ensure_not_cancelled(self) -> None:
-        if self.is_cancelled():
-            raise RuntimeError("下载已取消")
-
-    def run(self) -> None:
-        owned_temp_dir = ""
-        try:
-            self.ensure_not_cancelled()
-            result: Dict[str, Any] = {
-                "preview_type": self.preview_type,
-                "base_url": self.base_url,
-                "full_path": self.full_path,
-            }
-            if self.preview_type == "text":
-                result["content"] = self.client.preview_file(
-                    self.base_url,
-                    self.full_path,
-                    cancel_check=self.is_cancelled,
-                )
-            elif self.preview_type == "image":
-                owned_temp_dir = tempfile.mkdtemp(prefix=f"{APP_NAME}-image-")
-                local_path = os.path.join(owned_temp_dir, basename(self.full_path))
-                self.client.download_file_to_local(
-                    self.base_url,
-                    self.full_path,
-                    local_path,
-                    cancel_check=self.is_cancelled,
-                )
-                result["temp_dir"] = owned_temp_dir
-                result["local_path"] = local_path
-            elif self.preview_type == "model":
-                owned_temp_dir = tempfile.mkdtemp(
-                    prefix=f"{APP_NAME}-{get_path_extension(self.full_path).lstrip('.') or 'model'}-"
-                )
-                local_path = self.prepare_model(owned_temp_dir)
-                result["temp_dir"] = owned_temp_dir
-                result["local_path"] = local_path
-            else:
-                raise RuntimeError(f"不支持的预览类型: {self.preview_type}")
-
-            self.ensure_not_cancelled()
-            self.finished.emit(result)
-            owned_temp_dir = ""
-        except urllib.error.HTTPError as e:
-            self.error.emit(f"HTTP 错误: {e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            self.error.emit(f"网络错误: {e.reason}")
-        except RuntimeError as e:
-            if self.is_cancelled() or "取消" in str(e):
-                self.cancelled.emit()
-            else:
-                self.error.emit(str(e))
-        except Exception as e:
-            self.error.emit(f"预览准备失败: {e}")
-        finally:
-            if owned_temp_dir:
-                shutil.rmtree(owned_temp_dir, ignore_errors=True)
-
-    def prepare_model(self, temp_dir: str) -> str:
-        original_local_path = os.path.join(temp_dir, basename(self.full_path))
-        self.client.download_file_to_local(
-            self.base_url,
-            self.full_path,
-            original_local_path,
-            cancel_check=self.is_cancelled,
-        )
-        self.ensure_not_cancelled()
-
-        detected_format = sniff_model_format(original_local_path)
-        local_model_path = original_local_path
-        if detected_format == "glb" and get_path_extension(original_local_path) != ".glb":
-            local_model_path = replace_extension(original_local_path, ".glb")
-            os.replace(original_local_path, local_model_path)
-        elif detected_format == "gltf":
-            if get_path_extension(original_local_path) != ".gltf":
-                local_model_path = replace_extension(original_local_path, ".gltf")
-                os.replace(original_local_path, local_model_path)
-            self.download_gltf_sidecar_resources(temp_dir, local_model_path)
-        return local_model_path
-
-    def download_gltf_sidecar_resources(self, temp_dir: str, local_model_path: str) -> None:
-        remote_dir = posixpath.dirname(normalize_dir_path(self.full_path))
-        resolved_temp_dir = os.path.abspath(temp_dir)
-        for resource_path in collect_gltf_resource_paths(local_model_path):
-            self.ensure_not_cancelled()
-            remote_resource_path = normalize_dir_path(posixpath.join(remote_dir, resource_path))
-            local_resource_path = os.path.join(temp_dir, *resource_path.split("/"))
-            resolved_local_path = os.path.abspath(local_resource_path)
-            if (
-                not resolved_local_path.startswith(resolved_temp_dir + os.sep)
-                and resolved_local_path != resolved_temp_dir
-            ):
-                raise RuntimeError(f"资源路径越界，已拒绝下载: {resource_path}")
-            self.client.download_file_to_local(
-                self.base_url,
-                remote_resource_path,
-                resolved_local_path,
-                cancel_check=self.is_cancelled,
-            )
-
-
-@dataclass
-class PreviewLoadTask:
-    thread: QThread
-    worker: PreviewLoadWorker
-    dialog: QProgressDialog
-
-
 @dataclass
 class ModelPreviewProcess:
     process: subprocess.Popen
     temp_dir: str
 
 
-class PreviewDialog(QDialog):
-    def __init__(
-        self,
-        title: str,
-        content: str,
-        on_save_as: Optional[Callable[[], None]] = None,
-        parent: Optional[QWidget] = None,
-    ):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(900, 600)
-        self._on_save_as = on_save_as
-
-        text = QPlainTextEdit(self)
-        text.setReadOnly(True)
-        text.setPlainText(content)
-
-        buttons = QDialogButtonBox(self)
-        self.save_btn = buttons.addButton(
-            "另存为本地文件", QDialogButtonBox.ButtonRole.ActionRole
-        )
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
-        self.save_btn.setEnabled(on_save_as is not None)
-        self.save_btn.clicked.connect(self.handle_save_as)
-        close_btn.clicked.connect(self.close)
-
-        layout = QVBoxLayout()
-        layout.addWidget(text)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-        self.setWindowIcon(get_app_window_icon())
-
-    def handle_save_as(self) -> None:
-        if self._on_save_as is not None:
-            self._on_save_as()
-
-
-class ImagePreviewArea(QScrollArea):
-    zoomChanged = Signal(float)
-
-    def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._original_pixmap = pixmap
-        self._scale_factor = 1.0
-        self._drag_active = False
-        self._drag_start = QPoint()
-        self._drag_h_value = 0
-        self._drag_v_value = 0
-
-        self.setWidgetResizable(False)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setBackgroundRole(self.backgroundRole())
-        self.setStyleSheet("QScrollArea { background: #111; border: 1px solid #444; }")
-
-        self.image_label = QLabel(self)
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setWidget(self.image_label)
-        self.update_pixmap()
-
-    @property
-    def scale_factor(self) -> float:
-        return self._scale_factor
-
-    def reset_zoom(self) -> None:
-        self._scale_factor = 1.0
-        self.update_pixmap()
-        self.zoomChanged.emit(self._scale_factor)
-
-    def zoom_by(self, multiplier: float, anchor_pos=None) -> None:
-        old_factor = self._scale_factor
-        new_factor = max(0.05, min(8.0, old_factor * multiplier))
-        if abs(new_factor - old_factor) < 1e-9:
-            return
-        self._scale_factor = new_factor
-        self.update_pixmap()
-        self.zoomChanged.emit(self._scale_factor)
-        scale_change = new_factor / old_factor
-        if anchor_pos is None:
-            return
-        h_bar = self.horizontalScrollBar()
-        v_bar = self.verticalScrollBar()
-        h_bar.setValue(int((h_bar.value() + anchor_pos.x()) * scale_change - anchor_pos.x()))
-        v_bar.setValue(int((v_bar.value() + anchor_pos.y()) * scale_change - anchor_pos.y()))
-
-    def update_pixmap(self) -> None:
-        scaled = self._original_pixmap.scaled(
-            max(1, int(self._original_pixmap.width() * self._scale_factor)),
-            max(1, int(self._original_pixmap.height() * self._scale_factor)),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setPixmap(scaled)
-        self.image_label.resize(scaled.size())
-
-    def wheelEvent(self, event) -> None:
-        delta = event.angleDelta().y()
-        if delta == 0:
-            super().wheelEvent(event)
-            return
-        multiplier = 1.15 if delta > 0 else 1 / 1.15
-        self.zoom_by(multiplier, event.position().toPoint())
-        event.accept()
-
-    def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.reset_zoom()
-            event.accept()
-            return
-        super().mouseDoubleClickEvent(event)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_active = True
-            self._drag_start = event.position().toPoint()
-            self._drag_h_value = self.horizontalScrollBar().value()
-            self._drag_v_value = self.verticalScrollBar().value()
-            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_active:
-            delta = event.position().toPoint() - self._drag_start
-            self.horizontalScrollBar().setValue(self._drag_h_value - delta.x())
-            self.verticalScrollBar().setValue(self._drag_v_value - delta.y())
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_active:
-            self._drag_active = False
-            self.viewport().unsetCursor()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
-class ImagePreviewDialog(QDialog):
-    def __init__(
-        self,
-        title: str,
-        image_path: str,
-        on_save_as: Optional[Callable[[], None]] = None,
-        parent: Optional[QWidget] = None,
-    ):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(960, 720)
-        self.setWindowIcon(get_app_window_icon())
-        self._on_save_as = on_save_as
-        self._pixmap = QPixmap(image_path)
-        if self._pixmap.isNull():
-            raise RuntimeError("无法加载图片")
-
-        self.info_label = QLabel()
-        self.preview_area = ImagePreviewArea(self._pixmap, self)
-        self.preview_area.zoomChanged.connect(self.on_zoom_changed)
-
-        buttons = QDialogButtonBox(self)
-        self.save_btn = buttons.addButton("另存为本地文件", QDialogButtonBox.ButtonRole.ActionRole)
-        self.reset_btn = buttons.addButton("重置缩放", QDialogButtonBox.ButtonRole.ActionRole)
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
-        self.save_btn.setEnabled(on_save_as is not None)
-        self.save_btn.clicked.connect(self.handle_save_as)
-        self.reset_btn.clicked.connect(self.handle_reset_zoom)
-        close_btn.clicked.connect(self.close)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.info_label)
-        layout.addWidget(self.preview_area, 1)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-        self.update_info_label()
-
-    def handle_save_as(self) -> None:
-        if self._on_save_as is not None:
-            self._on_save_as()
-
-    def handle_reset_zoom(self) -> None:
-        self.preview_area.reset_zoom()
-        self.update_info_label()
-
-    def update_info_label(self) -> None:
-        zoom_percent = int(round(self.preview_area.scale_factor * 100))
-        self.info_label.setText(
-            f"{self._pixmap.width()} x {self._pixmap.height()} px | 缩放 {zoom_percent}% | 滚轮缩放，左键拖拽，双击重置"
-        )
-
-    def on_zoom_changed(self, _: float) -> None:
-        self.update_info_label()
-
-
-class EntryDetailDialog(QDialog):
-    def __init__(self, title: str, details_text: str, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(920, 680)
-        self.setWindowIcon(get_app_window_icon())
-
-        text = QPlainTextEdit(self)
-        text.setReadOnly(True)
-        text.setPlainText(details_text)
-
-        buttons = QDialogButtonBox(self)
-        copy_btn = buttons.addButton("复制全部", QDialogButtonBox.ButtonRole.ActionRole)
-        close_btn = buttons.addButton(QDialogButtonBox.StandardButton.Close)
-        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text.toPlainText()))
-        close_btn.clicked.connect(self.close)
-
-        layout = QVBoxLayout()
-        layout.addWidget(text)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-
-
-class SaveDirectoryWorker(QObject):
-    progress = Signal(str, int, int, int, str)
-    finished = Signal(dict)
-    cancelled = Signal(str)
-    error = Signal(str)
-
-    def __init__(self, client: SeaweedClient, base_url: str, source_dir: str, target_dir: str, page_limit: int):
-        super().__init__()
-        self.client = client
-        self.base_url = base_url
-        self.source_dir = normalize_dir_path(source_dir)
-        self.target_dir = target_dir
-        self.page_limit = page_limit
-        self._cancelled = False
-
-    def request_cancel(self) -> None:
-        self._cancelled = True
-
-    def is_cancelled(self) -> bool:
-        return self._cancelled
-
-    def run(self) -> None:
-        try:
-            files = self.collect_files()
-            total_files = len(files)
-            downloaded = 0
-            source_prefix = self.source_dir.rstrip("/")
-            if source_prefix == "":
-                source_prefix = "/"
-
-            for full_path in files:
-                if self.is_cancelled():
-                    self.cancelled.emit("用户已中断保存任务")
-                    return
-                rel_path = self.make_relative_path(full_path, source_prefix)
-                local_path = os.path.join(self.target_dir, rel_path.replace("/", os.sep))
-                self.client.download_file_to_local(
-                    self.base_url,
-                    full_path,
-                    local_path,
-                    cancel_check=self.is_cancelled,
-                )
-                downloaded += 1
-                self.progress.emit("download", 0, total_files, downloaded, full_path)
-
-            self.finished.emit(
-                {
-                    "total_files": total_files,
-                    "downloaded_files": downloaded,
-                    "target_dir": self.target_dir,
-                }
-            )
-        except RuntimeError as e:
-            if "取消" in str(e):
-                self.cancelled.emit("用户已中断保存任务")
-            else:
-                self.error.emit(str(e))
-        except Exception as e:
-            self.error.emit(f"保存失败: {e}")
-
-    def collect_files(self) -> List[str]:
-        queue: List[str] = [self.source_dir]
-        files: List[str] = []
-        scanned_dirs = 0
-        while queue:
-            if self.is_cancelled():
-                raise RuntimeError("下载已取消")
-            current = queue.pop(0)
-            entries = self.client.list_dir(self.base_url, current, self.page_limit)
-            scanned_dirs += 1
-            for entry in entries:
-                full_path = normalize_dir_path(str(entry.get("FullPath", "")))
-                if not full_path:
-                    continue
-                if is_directory(entry):
-                    queue.append(full_path)
-                else:
-                    files.append(full_path)
-            self.progress.emit("scan", scanned_dirs, len(files), 0, current)
-        return files
-
-    @staticmethod
-    def make_relative_path(full_path: str, source_prefix: str) -> str:
-        normalized = normalize_dir_path(full_path)
-        prefix = source_prefix.rstrip("/")
-        if prefix and normalized.startswith(prefix + "/"):
-            return normalized[len(prefix) + 1 :]
-        return normalized.lstrip("/")
-
-
 class MainWindow(QMainWindow):
+    DIRECTORY_LOAD_TASK = "directory-load"
+    DIRECTORY_SAVE_TASK = "directory-save"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SeaweedFS 文件浏览器")
@@ -1157,16 +287,17 @@ class MainWindow(QMainWindow):
         self.current_dir = normalize_dir_path(self.config.root_dir)
         self.entries: List[Dict[str, Any]] = []
         self._directory_cache: Dict[str, List[Dict[str, Any]]] = {}
-        self._loader_thread: Optional[QThread] = None
-        self._loader_worker: Optional[DirectoryLoadWorker] = None
         self._loading_dialog: Optional[QProgressDialog] = None
-        self._save_thread: Optional[QThread] = None
-        self._save_worker: Optional[SaveDirectoryWorker] = None
         self._save_dialog: Optional[QProgressDialog] = None
+        self._file_save_dialogs: Dict[str, QProgressDialog] = {}
         self._preview_windows: Dict[str, QWidget] = {}
-        self._preview_load_tasks: Dict[str, PreviewLoadTask] = {}
+        self._preview_load_dialogs: Dict[str, QProgressDialog] = {}
         self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
-        self._closing_after_preview_cancel = False
+        self._task_manager = TaskManager(self)
+        self._task_manager.task_finished.connect(self.on_managed_task_finished)
+        self._task_manager.all_finished.connect(self.on_all_tasks_finished)
+        self._closing_after_task_cancel = False
+        self._next_task_id = 0
         self._model_process_timer = QTimer(self)
         self._model_process_timer.setInterval(1000)
         self._model_process_timer.timeout.connect(self.reap_model_preview_processes)
@@ -1343,10 +474,10 @@ class MainWindow(QMainWindow):
         if not base_url:
             QMessageBox.warning(self, "参数错误", "地址不能为空")
             return
-        if self._save_thread and self._save_thread.isRunning():
+        if self._task_manager.contains(self.DIRECTORY_SAVE_TASK):
             QMessageBox.information(self, "任务进行中", "当前正在保存到本地，请稍候或先中断。")
             return
-        if self._loader_thread and self._loader_thread.isRunning():
+        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
             self.statusBar().showMessage("正在加载，请稍候...")
             return
         self.current_dir = normalize_dir_path(dir_path)
@@ -1359,34 +490,38 @@ class MainWindow(QMainWindow):
 
     def start_directory_load(self, base_url: str, dir_path: str) -> None:
         self.set_loading_ui(True)
-        self._loading_dialog = QProgressDialog("正在重新加载目录，请稍候...", "", 0, 0, self)
+        self._loading_dialog = QProgressDialog(
+            "正在重新加载目录，请稍候...",
+            "取消",
+            0,
+            0,
+            self,
+        )
         self._loading_dialog.setWindowTitle("加载中")
-        self._loading_dialog.setCancelButton(None)
         self._loading_dialog.setWindowModality(Qt.WindowModality.NonModal)
         self._loading_dialog.setMinimumDuration(0)
         self._loading_dialog.setAutoClose(False)
         self._loading_dialog.setAutoReset(False)
         self._loading_dialog.show()
 
-        self._loader_thread = QThread(self)
-        self._loader_worker = DirectoryLoadWorker(
+        worker = DirectoryLoadWorker(
             self.client,
             base_url,
             dir_path,
             self.config.page_limit,
         )
-        self._loader_worker.moveToThread(self._loader_thread)
-
-        self._loader_thread.started.connect(self._loader_worker.run)
-        self._loader_worker.progress.connect(self.on_directory_load_progress)
-        self._loader_worker.finished.connect(self.on_directory_load_finished)
-        self._loader_worker.error.connect(self.on_directory_load_failed)
-        self._loader_worker.finished.connect(self._loader_thread.quit)
-        self._loader_worker.error.connect(self._loader_thread.quit)
-        self._loader_thread.finished.connect(self._loader_worker.deleteLater)
-        self._loader_thread.finished.connect(self._loader_thread.deleteLater)
-        self._loader_thread.finished.connect(self.on_directory_load_thread_cleaned)
-        self._loader_thread.start()
+        worker.progress.connect(self.on_directory_load_progress)
+        worker.finished.connect(self.on_directory_load_finished)
+        worker.cancelled.connect(self.on_directory_load_cancelled)
+        worker.error.connect(self.on_directory_load_failed)
+        self._loading_dialog.canceled.connect(
+            lambda: self._task_manager.cancel(self.DIRECTORY_LOAD_TASK)
+        )
+        self._task_manager.start(
+            self.DIRECTORY_LOAD_TASK,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
+        )
 
     def on_directory_load_finished(self, entries: List[Dict[str, Any]]) -> None:
         self.entries = entries
@@ -1401,12 +536,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"正在加载... 已加载 {count} 条")
 
     def on_directory_load_failed(self, message: str) -> None:
-        QMessageBox.critical(self, "加载失败", message)
+        if not self._closing_after_task_cancel:
+            QMessageBox.critical(self, "加载失败", message)
         self.statusBar().showMessage("加载失败")
 
+    def on_directory_load_cancelled(self) -> None:
+        if not self._closing_after_task_cancel:
+            self.statusBar().showMessage("目录加载已取消")
+
     def on_directory_load_thread_cleaned(self) -> None:
-        self._loader_thread = None
-        self._loader_worker = None
         if self._loading_dialog is not None:
             self._loading_dialog.close()
             self._loading_dialog.deleteLater()
@@ -1522,6 +660,10 @@ class MainWindow(QMainWindow):
     def build_preview_window_key(self, preview_type: str, full_path: str) -> str:
         return f"{preview_type}:{self.get_base_url()}:{full_path}"
 
+    @staticmethod
+    def build_preview_task_key(preview_key: str) -> str:
+        return f"preview-load:{preview_key}"
+
     def activate_preview_window(self, preview_key: str) -> bool:
         window = self._preview_windows.get(preview_key)
         if window is None:
@@ -1585,11 +727,13 @@ class MainWindow(QMainWindow):
             return
         if preview_type == "model" and self.activate_model_preview_process(preview_key):
             return
-        if preview_key in self._preview_load_tasks:
-            task = self._preview_load_tasks[preview_key]
-            task.dialog.show()
-            task.dialog.raise_()
-            task.dialog.activateWindow()
+        task_key = self.build_preview_task_key(preview_key)
+        if self._task_manager.contains(task_key):
+            dialog = self._preview_load_dialogs.get(preview_key)
+            if dialog is not None:
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
             return
         if preview_type == "model":
             try:
@@ -1620,14 +764,11 @@ class MainWindow(QMainWindow):
         dialog.setAutoReset(False)
         dialog.show()
 
-        thread = QThread(self)
         worker = PreviewLoadWorker(self.client, preview_type, base_url, full_path)
-        worker.moveToThread(thread)
-        task = PreviewLoadTask(thread=thread, worker=worker, dialog=dialog)
-        self._preview_load_tasks[preview_key] = task
+        task_key = self.build_preview_task_key(preview_key)
+        self._preview_load_dialogs[preview_key] = dialog
 
-        thread.started.connect(worker.run)
-        dialog.canceled.connect(lambda target=worker: target.request_cancel())
+        dialog.canceled.connect(lambda key=task_key: self._task_manager.cancel(key))
         dialog.canceled.connect(
             lambda key=preview_key: self.on_preview_cancel_requested(key)
         )
@@ -1640,33 +781,36 @@ class MainWindow(QMainWindow):
         worker.error.connect(
             lambda message, key=preview_key: self.on_preview_load_failed(key, message)
         )
-        worker.finished.connect(thread.quit)
-        worker.cancelled.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(
-            lambda key=preview_key: self.on_preview_load_thread_cleaned(key)
+        self._task_manager.start(
+            task_key,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
         )
-        thread.start()
         self.statusBar().showMessage(f"正在准备{label}预览: {basename(full_path)}")
 
     def on_preview_cancel_requested(self, preview_key: str) -> None:
-        task = self._preview_load_tasks.get(preview_key)
-        if task is not None:
-            task.dialog.setLabelText("正在取消预览加载，请稍候...")
+        dialog = self._preview_load_dialogs.get(preview_key)
+        if dialog is not None:
+            dialog.setLabelText("正在取消预览加载，请稍候...")
 
     def on_preview_load_finished(self, preview_key: str, result: Dict[str, Any]) -> None:
         preview_type = str(result.get("preview_type", ""))
         full_path = str(result.get("full_path", ""))
         temp_dir = str(result.get("temp_dir", ""))
         local_path = str(result.get("local_path", ""))
-        task = self._preview_load_tasks.get(preview_key)
-        if task is not None and (task.dialog.wasCanceled() or task.worker.is_cancelled()):
+        task = self._task_manager.get(self.build_preview_task_key(preview_key))
+        dialog = self._preview_load_dialogs.get(preview_key)
+        if (
+            task is not None
+            and (
+                task.worker.is_cancelled()
+                or (dialog is not None and dialog.wasCanceled())
+            )
+        ):
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return
-        if self._closing_after_preview_cancel:
+        if self._closing_after_task_cancel:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return
@@ -1703,28 +847,26 @@ class MainWindow(QMainWindow):
                 raise RuntimeError(f"不支持的预览类型: {preview_type}")
             self.statusBar().showMessage(f"已打开预览: {basename(full_path)}")
         except Exception as e:
-            if not self._closing_after_preview_cancel:
+            if not self._closing_after_task_cancel:
                 QMessageBox.critical(self, "预览失败", str(e))
         finally:
             if temp_dir:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
     def on_preview_load_cancelled(self, preview_key: str) -> None:
-        if not self._closing_after_preview_cancel:
+        if not self._closing_after_task_cancel:
             self.statusBar().showMessage("预览加载已取消")
 
     def on_preview_load_failed(self, preview_key: str, message: str) -> None:
-        if not self._closing_after_preview_cancel:
+        if not self._closing_after_task_cancel:
             QMessageBox.critical(self, "预览失败", message)
             self.statusBar().showMessage("预览加载失败")
 
     def on_preview_load_thread_cleaned(self, preview_key: str) -> None:
-        task = self._preview_load_tasks.pop(preview_key, None)
-        if task is not None:
-            task.dialog.close()
-            task.dialog.deleteLater()
-        if self._closing_after_preview_cancel and not self._preview_load_tasks:
-            QTimer.singleShot(0, self.close)
+        dialog = self._preview_load_dialogs.pop(preview_key, None)
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
 
     def activate_model_preview_process(self, preview_key: str) -> bool:
         record = self._model_preview_processes.get(preview_key)
@@ -1766,38 +908,86 @@ class MainWindow(QMainWindow):
         save_path, _ = QFileDialog.getSaveFileName(self, "另存为", default_name, "所有文件 (*)")
         if not save_path:
             return
+        self._next_task_id += 1
+        task_key = f"file-save:{self._next_task_id}"
         progress = QProgressDialog("正在保存文件...", "中断", 0, 0, self)
         progress.setWindowTitle("保存中")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowModality(Qt.WindowModality.NonModal)
         progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
         progress.show()
-        try:
-            self.client.download_file_to_local(
-                self.get_base_url(),
-                full_path,
-                save_path,
-                cancel_check=progress.wasCanceled,
+        self._file_save_dialogs[task_key] = progress
+
+        worker = FileDownloadWorker(
+            self.client,
+            self.get_base_url(),
+            full_path,
+            save_path,
+        )
+        progress.canceled.connect(lambda key=task_key: self._task_manager.cancel(key))
+        worker.progress.connect(
+            lambda downloaded, total, key=task_key: self.on_file_save_progress(
+                key,
+                downloaded,
+                total,
             )
-            if progress.wasCanceled():
-                if os.path.exists(save_path):
-                    try:
-                        os.remove(save_path)
-                    except Exception:
-                        pass
-                QMessageBox.information(self, "已中断", "文件保存已中断。")
-            else:
-                QMessageBox.information(self, "保存成功", f"文件已保存到:\n{save_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "保存失败", str(e))
-        finally:
-            progress.close()
-            progress.deleteLater()
+        )
+        worker.finished.connect(
+            lambda path, key=task_key: self.on_file_save_finished(key, path)
+        )
+        worker.cancelled.connect(
+            lambda key=task_key: self.on_file_save_cancelled(key)
+        )
+        worker.error.connect(
+            lambda message, key=task_key: self.on_file_save_failed(key, message)
+        )
+        self._task_manager.start(
+            task_key,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
+        )
+        self.statusBar().showMessage(f"正在保存: {basename(full_path)}")
+
+    def on_file_save_progress(
+        self,
+        task_key: str,
+        downloaded: int,
+        total: int,
+    ) -> None:
+        dialog = self._file_save_dialogs.get(task_key)
+        if dialog is None:
+            return
+        if total > 0:
+            percent = min(100, int(downloaded * 100 / total))
+            dialog.setRange(0, 100)
+            dialog.setValue(percent)
+            dialog.setLabelText(
+                f"正在保存文件...\n{format_size(downloaded)} / {format_size(total)}"
+            )
+        else:
+            dialog.setRange(0, 0)
+            dialog.setLabelText(f"正在保存文件...\n已下载 {format_size(downloaded)}")
+
+    def on_file_save_finished(self, task_key: str, save_path: str) -> None:
+        if not self._closing_after_task_cancel:
+            QMessageBox.information(self, "保存成功", f"文件已保存到:\n{save_path}")
+            self.statusBar().showMessage(f"保存完成: {save_path}")
+
+    def on_file_save_cancelled(self, task_key: str) -> None:
+        if not self._closing_after_task_cancel:
+            self.statusBar().showMessage("文件保存已中断")
+
+    def on_file_save_failed(self, task_key: str, message: str) -> None:
+        if not self._closing_after_task_cancel:
+            QMessageBox.critical(self, "保存失败", message)
+            self.statusBar().showMessage("文件保存失败")
 
     def save_current_directory_to_local(self) -> None:
-        if self._loader_thread and self._loader_thread.isRunning():
+        if self._task_manager.contains(self.DIRECTORY_LOAD_TASK):
             QMessageBox.information(self, "任务进行中", "目录正在加载中，请稍后再保存。")
             return
-        if self._save_thread and self._save_thread.isRunning():
+        if self._task_manager.contains(self.DIRECTORY_SAVE_TASK):
             QMessageBox.information(self, "任务进行中", "已存在保存任务，请先等待完成或中断。")
             return
         base_url = self.get_base_url()
@@ -1817,30 +1007,25 @@ class MainWindow(QMainWindow):
         self._save_dialog.setAutoReset(False)
         self._save_dialog.show()
 
-        self._save_thread = QThread(self)
-        self._save_worker = SaveDirectoryWorker(
+        worker = SaveDirectoryWorker(
             self.client,
             base_url,
             self.current_dir,
             target_dir,
             self.config.page_limit,
         )
-        self._save_worker.moveToThread(self._save_thread)
-
-        self._save_thread.started.connect(self._save_worker.run)
-        self._save_worker.progress.connect(self.on_save_progress)
-        self._save_worker.finished.connect(self.on_save_finished)
-        self._save_worker.cancelled.connect(self.on_save_cancelled)
-        self._save_worker.error.connect(self.on_save_failed)
-        self._save_dialog.canceled.connect(self._save_worker.request_cancel)
-
-        self._save_worker.finished.connect(self._save_thread.quit)
-        self._save_worker.cancelled.connect(self._save_thread.quit)
-        self._save_worker.error.connect(self._save_thread.quit)
-        self._save_thread.finished.connect(self._save_worker.deleteLater)
-        self._save_thread.finished.connect(self._save_thread.deleteLater)
-        self._save_thread.finished.connect(self.on_save_thread_cleaned)
-        self._save_thread.start()
+        worker.progress.connect(self.on_save_progress)
+        worker.finished.connect(self.on_save_finished)
+        worker.cancelled.connect(self.on_save_cancelled)
+        worker.error.connect(self.on_save_failed)
+        self._save_dialog.canceled.connect(
+            lambda: self._task_manager.cancel(self.DIRECTORY_SAVE_TASK)
+        )
+        self._task_manager.start(
+            self.DIRECTORY_SAVE_TASK,
+            worker,
+            (worker.finished, worker.cancelled, worker.error),
+        )
         self.statusBar().showMessage("开始递归保存当前目录...")
 
     def on_save_progress(
@@ -1867,47 +1052,78 @@ class MainWindow(QMainWindow):
         total_files = int(result.get("total_files", 0))
         downloaded_files = int(result.get("downloaded_files", 0))
         target_dir = str(result.get("target_dir", ""))
-        QMessageBox.information(
-            self,
-            "保存完成",
-            f"递归保存已完成。\n文件: {downloaded_files}/{total_files}\n目录: {target_dir}",
-        )
+        if not self._closing_after_task_cancel:
+            QMessageBox.information(
+                self,
+                "保存完成",
+                f"递归保存已完成。\n文件: {downloaded_files}/{total_files}\n目录: {target_dir}",
+            )
         self.statusBar().showMessage(f"保存完成: {downloaded_files}/{total_files}")
-        if target_dir:
+        if target_dir and not self._closing_after_task_cancel:
             try:
                 open_path_in_file_explorer(target_dir)
             except Exception as e:
                 QMessageBox.warning(self, "提示", f"保存完成，但自动打开目录失败:\n{e}")
 
     def on_save_cancelled(self, message: str) -> None:
-        QMessageBox.information(self, "已中断", message)
+        if not self._closing_after_task_cancel:
+            QMessageBox.information(self, "已中断", message)
         self.statusBar().showMessage("保存已中断")
 
     def on_save_failed(self, message: str) -> None:
-        QMessageBox.critical(self, "保存失败", message)
+        if not self._closing_after_task_cancel:
+            QMessageBox.critical(self, "保存失败", message)
         self.statusBar().showMessage("保存失败")
 
     def on_save_thread_cleaned(self) -> None:
-        self._save_thread = None
-        self._save_worker = None
         if self._save_dialog is not None:
             self._save_dialog.close()
             self._save_dialog.deleteLater()
             self._save_dialog = None
         self.set_loading_ui(False)
 
+    def on_managed_task_finished(self, task_key: str) -> None:
+        if task_key == self.DIRECTORY_LOAD_TASK:
+            self.on_directory_load_thread_cleaned()
+            return
+        if task_key == self.DIRECTORY_SAVE_TASK:
+            self.on_save_thread_cleaned()
+            return
+        if task_key.startswith("preview-load:"):
+            preview_key = task_key[len("preview-load:") :]
+            self.on_preview_load_thread_cleaned(preview_key)
+            return
+        if task_key.startswith("file-save:"):
+            dialog = self._file_save_dialogs.pop(task_key, None)
+            if dialog is not None:
+                dialog.close()
+                dialog.deleteLater()
+
+    def on_all_tasks_finished(self) -> None:
+        if self._closing_after_task_cancel:
+            QTimer.singleShot(0, self.close)
+
     def closeEvent(self, event) -> None:
         for window in list(self._preview_windows.values()):
             window.close()
 
-        if self._preview_load_tasks:
-            self._closing_after_preview_cancel = True
+        if self._task_manager.has_active_tasks():
+            self._closing_after_task_cancel = True
             self.setEnabled(False)
-            self.statusBar().showMessage("正在取消预览加载并清理临时资源...")
-            for task in list(self._preview_load_tasks.values()):
-                task.worker.request_cancel()
-                task.dialog.setLabelText("正在取消预览加载，请稍候...")
-                task.dialog.hide()
+            self.statusBar().showMessage("正在取消后台任务并清理临时资源...")
+            self._task_manager.cancel_all()
+            for dialog in list(self._preview_load_dialogs.values()):
+                dialog.setLabelText("正在取消预览加载，请稍候...")
+                dialog.hide()
+            for dialog in list(self._file_save_dialogs.values()):
+                dialog.setLabelText("正在取消文件保存，请稍候...")
+                dialog.hide()
+            if self._loading_dialog is not None:
+                self._loading_dialog.setLabelText("正在取消目录加载，请稍候...")
+                self._loading_dialog.hide()
+            if self._save_dialog is not None:
+                self._save_dialog.setLabelText("正在取消目录保存，请稍候...")
+                self._save_dialog.hide()
             event.ignore()
             return
 

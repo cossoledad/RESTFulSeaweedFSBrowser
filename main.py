@@ -79,7 +79,6 @@ from seaweed_browser.uploads import UploadItem, build_upload_items
 from seaweed_browser.resources import (
     get_app_window_icon,
     get_base_dir,
-    get_windows_icon_path,
     is_bundled_app,
 )
 from seaweed_browser.widgets import (
@@ -90,7 +89,6 @@ from seaweed_browser.widgets import (
 )
 
 
-WINDOW_ICON_HANDLES: List[int] = []
 F3D_DLL_DIRECTORY_HANDLES: List[Any] = []
 F3D_RUNTIME_DLL_NAMES = ["f3d.dll", "vcruntime140.dll", "zlib.dll"]
 
@@ -159,201 +157,168 @@ def configure_f3d_dll_search_path() -> None:
         F3D_DLL_DIRECTORY_HANDLES.append(add_dll_directory(f3d_bin_dir))
 
 
-def load_windows_app_icon_handles() -> tuple[int, int]:
-    if not sys.platform.startswith("win"):
-        return 0, 0
-
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.windll.user32
-    shell32 = ctypes.windll.shell32
-    IMAGE_ICON = 1
-    LR_LOADFROMFILE = 0x0010
-
-    icon_path = get_windows_icon_path()
-    if icon_path:
-        # ctypes defaults pointer-returning Win32 APIs to a 32-bit c_int.  That
-        # truncates HICON on 64-bit Windows, so declare the signature explicitly.
-        user32.LoadImageW.argtypes = [
-            wintypes.HINSTANCE,
-            wintypes.LPCWSTR,
-            wintypes.UINT,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.UINT,
-        ]
-        user32.LoadImageW.restype = wintypes.HANDLE
-        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
-        user32.GetSystemMetrics.restype = ctypes.c_int
-        icon_sizes = (
-            (user32.GetSystemMetrics(11), user32.GetSystemMetrics(12)),
-            (user32.GetSystemMetrics(49), user32.GetSystemMetrics(50)),
-        )
-        handles = []
-        for width, height in icon_sizes:
-            handle = user32.LoadImageW(
-                None,
-                icon_path,
-                IMAGE_ICON,
-                width,
-                height,
-                LR_LOADFROMFILE,
-            )
-            handles.append(int(handle or 0))
-        if handles[0] or handles[1]:
-            return handles[0] or handles[1], handles[1] or handles[0]
-
-    if is_bundled_app():
-        shell32.ExtractIconExW.argtypes = [
-            wintypes.LPCWSTR,
-            ctypes.c_int,
-            ctypes.POINTER(wintypes.HICON),
-            ctypes.POINTER(wintypes.HICON),
-            wintypes.UINT,
-        ]
-        shell32.ExtractIconExW.restype = wintypes.UINT
-        small_icon = wintypes.HICON()
-        large_icon = wintypes.HICON()
-        extracted = shell32.ExtractIconExW(
-            sys.executable,
-            0,
-            ctypes.byref(large_icon),
-            ctypes.byref(small_icon),
-            1,
-        )
-        if extracted > 0:
-            large = int(large_icon.value or small_icon.value or 0)
-            small = int(small_icon.value or large_icon.value or 0)
-            return large, small
-    return 0, 0
-
-
-def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
+def launch_f3d_preview_subprocess(
+    model_path: str,
+    cleanup_dir: str,
+) -> subprocess.Popen:
     ensure_f3d_runtime_layout()
     configure_f3d_dll_search_path()
-    args = get_preview_runtime_args() + ["--f3d-preview", model_path, "--cleanup-dir", cleanup_dir]
+    args = get_preview_runtime_args() + [
+        "--f3d-preview",
+        model_path,
+        "--cleanup-dir",
+        cleanup_dir,
+    ]
     popen_kwargs: Dict[str, Any] = {}
     if sys.platform.startswith("win"):
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_kwargs["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
+        )
     return subprocess.Popen(args, **popen_kwargs)
 
 
-def apply_windows_window_icon_later() -> None:
-    """Promote the F3D native window and apply the application icon."""
-    if not sys.platform.startswith("win"):
-        return
+class F3DPreviewHost(QMainWindow):
+    """Qt-owned frame which embeds the otherwise icon-less F3D HWND on Windows."""
 
-    def worker() -> None:
-        import ctypes
-        from ctypes import wintypes
+    def __init__(self, title: str, width: int, height: int):
+        super().__init__()
+        self._f3d_hwnd = 0
+        self.setWindowTitle(title)
+        self.setWindowIcon(get_app_window_icon())
+        self.resize(width, height)
+        self.setCentralWidget(QWidget(self))
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        WM_SETICON = 0x0080
-        ICON_SMALL = 0
-        ICON_BIG = 1
-        GCLP_HICON = -14
-        GCLP_HICONSM = -34
-        GWL_EXSTYLE = -20
-        GWLP_HWNDPARENT = -8
-        WS_EX_TOOLWINDOW = 0x00000080
-        WS_EX_APPWINDOW = 0x00040000
-        SWP_NOSIZE = 0x0001
-        SWP_NOMOVE = 0x0002
-        SWP_NOZORDER = 0x0004
-        SWP_FRAMECHANGED = 0x0020
+    def attach_f3d_window_later(self) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        host_hwnd = int(self.winId())
+        container_hwnd = int(self.centralWidget().winId())
 
-        LONG_PTR = ctypes.c_ssize_t
-        WNDENUMPROC = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HWND,
-            wintypes.LPARAM,
-        )
-        user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-        user32.EnumWindows.restype = wintypes.BOOL
-        user32.GetWindowThreadProcessId.argtypes = [
-            wintypes.HWND,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-        user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        user32.IsWindowVisible.restype = wintypes.BOOL
-        user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.GetWindowLongPtrW.restype = LONG_PTR
-        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
-        user32.SetWindowLongPtrW.restype = LONG_PTR
-        user32.SetClassLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
-        user32.SetClassLongPtrW.restype = LONG_PTR
-        user32.SendMessageW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.SendMessageW.restype = wintypes.LPARAM
-        user32.SetWindowPos.argtypes = [
-            wintypes.HWND,
-            wintypes.HWND,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.UINT,
-        ]
-        user32.SetWindowPos.restype = wintypes.BOOL
+        def worker() -> None:
+            import ctypes
+            from ctypes import wintypes
 
-        target_pid = kernel32.GetCurrentProcessId()
-        large_icon, small_icon = load_windows_app_icon_handles()
-        WINDOW_ICON_HANDLES.extend(
-            handle for handle in (large_icon, small_icon) if handle
-        )
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            GWL_STYLE = -16
+            WS_CHILD = 0x40000000
+            WS_VISIBLE = 0x10000000
+            WS_CAPTION = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_SYSMENU = 0x00080000
+            LONG_PTR = ctypes.c_ssize_t
+            WNDENUMPROC = ctypes.WINFUNCTYPE(
+                wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+            )
+            user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+            user32.EnumWindows.restype = wintypes.BOOL
+            user32.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            user32.SetParent.argtypes = [wintypes.HWND, wintypes.HWND]
+            user32.SetParent.restype = wintypes.HWND
+            user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongPtrW.restype = LONG_PTR
+            user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
+            user32.SetWindowLongPtrW.restype = LONG_PTR
+            user32.GetClientRect.argtypes = [
+                wintypes.HWND,
+                ctypes.POINTER(wintypes.RECT),
+            ]
+            user32.GetClientRect.restype = wintypes.BOOL
+            user32.MoveWindow.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.BOOL,
+            ]
+            user32.MoveWindow.restype = wintypes.BOOL
 
-        hwnd_list: List[int] = []
+            target_pid = kernel32.GetCurrentProcessId()
+            matches: List[int] = []
 
-        def enum_windows_proc(hwnd, _lparam):
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value != target_pid or not user32.IsWindowVisible(hwnd):
+            def enum_windows_proc(hwnd, _lparam):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                value = int(hwnd)
+                if (
+                    pid.value == target_pid
+                    and value != host_hwnd
+                    and value != container_hwnd
+                    and user32.IsWindowVisible(hwnd)
+                ):
+                    matches.append(value)
                 return True
-            # The preview subprocess does not create a Qt main window, so every
-            # visible top-level window belonging to it is an F3D/VTK window.
-            # Do not match the caption: VTK is allowed to rewrite it after a
-            # scene is loaded, which made the previous icon update miss it.
-            hwnd_list.append(int(hwnd))
-            return True
 
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            hwnd_list.clear()
-            user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
-            if hwnd_list:
-                for hwnd in hwnd_list:
-                    # F3D/VTK can create an owned tool window, which Windows
-                    # minimizes onto the desktop instead of the taskbar.  Turn
-                    # it into a regular top-level application window.
-                    ex_style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-                    ex_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-                    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style)
-                    user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
-                    if large_icon:
-                        user32.SetClassLongPtrW(hwnd, GCLP_HICON, large_icon)
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, large_icon)
-                    if small_icon:
-                        user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, small_icon)
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small_icon)
-                    user32.SetWindowPos(
-                        hwnd,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            deadline = time.time() + 10.0
+            callback = WNDENUMPROC(enum_windows_proc)
+            while time.time() < deadline and not self._f3d_hwnd:
+                matches.clear()
+                user32.EnumWindows(callback, 0)
+                if matches:
+                    child_hwnd = matches[0]
+                    user32.SetParent(child_hwnd, container_hwnd)
+                    style = user32.GetWindowLongPtrW(child_hwnd, GWL_STYLE)
+                    style &= ~(
+                        WS_CAPTION
+                        | WS_THICKFRAME
+                        | WS_MINIMIZEBOX
+                        | WS_MAXIMIZEBOX
+                        | WS_SYSMENU
                     )
-            time.sleep(0.2)
+                    style |= WS_CHILD | WS_VISIBLE
+                    user32.SetWindowLongPtrW(child_hwnd, GWL_STYLE, style)
+                    self._f3d_hwnd = child_hwnd
+                    area = wintypes.RECT()
+                    user32.GetClientRect(container_hwnd, ctypes.byref(area))
+                    user32.MoveWindow(
+                        child_hwnd,
+                        0,
+                        0,
+                        area.right - area.left,
+                        area.bottom - area.top,
+                        True,
+                    )
+                    return
+                time.sleep(0.05)
 
-    threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _resize_f3d_window(self) -> None:
+        if not self._f3d_hwnd or not sys.platform.startswith("win"):
+            return
+        import ctypes
+
+        area = self.centralWidget().rect()
+        ctypes.windll.user32.MoveWindow(
+            self._f3d_hwnd,
+            0,
+            0,
+            area.width(),
+            area.height(),
+            True,
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._resize_f3d_window()
+
+    def closeEvent(self, event) -> None:
+        if self._f3d_hwnd and sys.platform.startswith("win"):
+            import ctypes
+
+            ctypes.windll.user32.PostMessageW(self._f3d_hwnd, 0x0010, 0, 0)
+        super().closeEvent(event)
 
 
 def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
@@ -365,6 +330,8 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
         print(tr("缺少依赖: f3d。请先执行 pip install f3d"), file=sys.stderr)
         return 1
 
+    qt_app = None
+    host = None
     try:
         engine = f3d.Engine.create()
         window_width = 960
@@ -376,18 +343,17 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
         except Exception:
             pass
         if sys.platform.startswith("win"):
-            try:
-                import ctypes
-
-                user32 = ctypes.windll.user32
-                screen_w = user32.GetSystemMetrics(0)
-                screen_h = user32.GetSystemMetrics(1)
-                pos_x = max(0, (screen_w - window_width) // 2)
-                pos_y = max(0, (screen_h - window_height) // 2)
-                engine.window.set_position(pos_x, pos_y)
-            except Exception:
-                pass
-        apply_windows_window_icon_later()
+            qt_app = QApplication.instance() or QApplication(sys.argv)
+            qt_app.setWindowIcon(get_app_window_icon())
+            host = F3DPreviewHost(window_title, window_width, window_height)
+            screen = host.screen().availableGeometry()
+            host.move(
+                screen.center().x() - host.width() // 2,
+                screen.center().y() - host.height() // 2,
+            )
+            host.show()
+            qt_app.processEvents()
+            host.attach_f3d_window_later()
         try:
             engine.scene.add(model_path)
         except RuntimeError as e:
@@ -405,6 +371,10 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
         engine.interactor.start()
         return 0
     finally:
+        if host is not None:
+            host.close()
+        if qt_app is not None:
+            qt_app.processEvents()
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
 

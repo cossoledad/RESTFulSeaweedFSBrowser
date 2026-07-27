@@ -24,23 +24,20 @@ class ReleaseContractTests(unittest.TestCase):
             re.compile(r"github\.ref == 'refs/heads/(main|master)'"),
         )
 
-    def test_f3d_runtime_files_are_packaged_recursively(self) -> None:
+    def test_model_preview_uses_packaged_qt_quick_resource(self) -> None:
         build_script = Path("build.ps1").read_text(encoding="utf-8")
-        self.assertIn(
-            "Get-ChildItem -Path $ResolvedF3dBinDir -File -Recurse",
-            build_script,
-        )
-        self.assertIn("=f3d/bin/$relativeBinPath", build_script)
+        self.assertIn("--include-data-dir=resource=resource", build_script)
+        self.assertIn("--include-qt-plugins=qml", build_script)
+        self.assertNotIn("--include-package=f3d", build_script)
+        self.assertTrue(Path("resource/model_preview.qml").is_file())
 
-    def test_f3d_window_is_embedded_in_qt_icon_host(self) -> None:
+    def test_model_preview_is_a_single_qt_quick_window(self) -> None:
         main_source = Path("main.py").read_text(encoding="utf-8")
-        self.assertIn("class F3DPreviewHost(QMainWindow):", main_source)
+        self.assertIn("class ModelPreviewWindow(QMainWindow):", main_source)
         self.assertIn("self.setWindowIcon(get_app_window_icon())", main_source)
-        self.assertIn("user32.SetParent(child_hwnd, container_hwnd)", main_source)
-        self.assertIn("user32.GetParent(child_hwnd)", main_source)
-        self.assertIn("user32.ShowWindow(host_hwnd, 5)", main_source)
-        self.assertNotIn("host.show()", main_source)
-        self.assertIn("host.attach_f3d_window_later()", main_source)
+        self.assertIn("viewer = QQuickWidget(self)", main_source)
+        self.assertNotIn("import f3d", main_source)
+        self.assertNotIn("SetParent", main_source)
 
 
 if __name__ == "__main__":

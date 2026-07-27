@@ -32,6 +32,14 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertIn("=f3d/bin/$relativeBinPath", build_script)
 
+    def test_f3d_window_icon_updates_instance_and_window_class(self) -> None:
+        main_source = Path("main.py").read_text(encoding="utf-8")
+        self.assertIn("LoadImageW.restype = wintypes.HANDLE", main_source)
+        self.assertIn("SetClassLongPtrW(hwnd, GCLP_HICON, large_icon)", main_source)
+        self.assertIn("SendMessageW(hwnd, WM_SETICON, ICON_BIG, large_icon)", main_source)
+        self.assertIn("SetClassLongPtrW(hwnd, GCLP_HICONSM, small_icon)", main_source)
+        self.assertIn("SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small_icon)", main_source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -159,9 +159,9 @@ def configure_f3d_dll_search_path() -> None:
         F3D_DLL_DIRECTORY_HANDLES.append(add_dll_directory(f3d_bin_dir))
 
 
-def load_windows_app_icon_handle() -> int:
+def load_windows_app_icon_handles() -> tuple[int, int]:
     if not sys.platform.startswith("win"):
-        return 0
+        return 0, 0
 
     import ctypes
     from ctypes import wintypes
@@ -169,7 +169,6 @@ def load_windows_app_icon_handle() -> int:
     user32 = ctypes.windll.user32
     shell32 = ctypes.windll.shell32
     IMAGE_ICON = 1
-    LR_DEFAULTSIZE = 0x0040
     LR_LOADFROMFILE = 0x0010
 
     icon_path = get_windows_icon_path()
@@ -185,16 +184,25 @@ def load_windows_app_icon_handle() -> int:
             wintypes.UINT,
         ]
         user32.LoadImageW.restype = wintypes.HANDLE
-        handle = user32.LoadImageW(
-            None,
-            icon_path,
-            IMAGE_ICON,
-            0,
-            0,
-            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        user32.GetSystemMetrics.restype = ctypes.c_int
+        icon_sizes = (
+            (user32.GetSystemMetrics(11), user32.GetSystemMetrics(12)),
+            (user32.GetSystemMetrics(49), user32.GetSystemMetrics(50)),
         )
-        if handle:
-            return int(handle)
+        handles = []
+        for width, height in icon_sizes:
+            handle = user32.LoadImageW(
+                None,
+                icon_path,
+                IMAGE_ICON,
+                width,
+                height,
+                LR_LOADFROMFILE,
+            )
+            handles.append(int(handle or 0))
+        if handles[0] or handles[1]:
+            return handles[0] or handles[1], handles[1] or handles[0]
 
     if is_bundled_app():
         shell32.ExtractIconExW.argtypes = [
@@ -215,8 +223,10 @@ def load_windows_app_icon_handle() -> int:
             1,
         )
         if extracted > 0:
-            return int(large_icon.value or small_icon.value or 0)
-    return 0
+            large = int(large_icon.value or small_icon.value or 0)
+            small = int(small_icon.value or large_icon.value or 0)
+            return large, small
+    return 0, 0
 
 
 def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
@@ -229,7 +239,7 @@ def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subproce
     return subprocess.Popen(args, **popen_kwargs)
 
 
-def apply_windows_window_icon_later(window_title: str) -> None:
+def apply_windows_window_icon_later() -> None:
     """Promote the F3D native window and apply the application icon."""
     if not sys.platform.startswith("win"):
         return
@@ -243,6 +253,8 @@ def apply_windows_window_icon_later(window_title: str) -> None:
         WM_SETICON = 0x0080
         ICON_SMALL = 0
         ICON_BIG = 1
+        GCLP_HICON = -14
+        GCLP_HICONSM = -34
         GWL_EXSTYLE = -20
         GWLP_HWNDPARENT = -8
         WS_EX_TOOLWINDOW = 0x00000080
@@ -267,18 +279,12 @@ def apply_windows_window_icon_later(window_title: str) -> None:
         user32.GetWindowThreadProcessId.restype = wintypes.DWORD
         user32.IsWindowVisible.argtypes = [wintypes.HWND]
         user32.IsWindowVisible.restype = wintypes.BOOL
-        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-        user32.GetWindowTextLengthW.restype = ctypes.c_int
-        user32.GetWindowTextW.argtypes = [
-            wintypes.HWND,
-            wintypes.LPWSTR,
-            ctypes.c_int,
-        ]
-        user32.GetWindowTextW.restype = ctypes.c_int
         user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
         user32.GetWindowLongPtrW.restype = LONG_PTR
         user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
         user32.SetWindowLongPtrW.restype = LONG_PTR
+        user32.SetClassLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
+        user32.SetClassLongPtrW.restype = LONG_PTR
         user32.SendMessageW.argtypes = [
             wintypes.HWND,
             wintypes.UINT,
@@ -298,9 +304,10 @@ def apply_windows_window_icon_later(window_title: str) -> None:
         user32.SetWindowPos.restype = wintypes.BOOL
 
         target_pid = kernel32.GetCurrentProcessId()
-        icon_handle = load_windows_app_icon_handle()
-        if icon_handle:
-            WINDOW_ICON_HANDLES.append(icon_handle)
+        large_icon, small_icon = load_windows_app_icon_handles()
+        WINDOW_ICON_HANDLES.extend(
+            handle for handle in (large_icon, small_icon) if handle
+        )
 
         hwnd_list: List[int] = []
 
@@ -309,11 +316,11 @@ def apply_windows_window_icon_later(window_title: str) -> None:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if pid.value != target_pid or not user32.IsWindowVisible(hwnd):
                 return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            title_buffer = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, title_buffer, len(title_buffer))
-            if title_buffer.value == window_title:
-                hwnd_list.append(int(hwnd))
+            # The preview subprocess does not create a Qt main window, so every
+            # visible top-level window belonging to it is an F3D/VTK window.
+            # Do not match the caption: VTK is allowed to rewrite it after a
+            # scene is loaded, which made the previous icon update miss it.
+            hwnd_list.append(int(hwnd))
             return True
 
         deadline = time.time() + 5.0
@@ -329,9 +336,12 @@ def apply_windows_window_icon_later(window_title: str) -> None:
                     ex_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
                     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style)
                     user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
-                    if icon_handle:
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
+                    if large_icon:
+                        user32.SetClassLongPtrW(hwnd, GCLP_HICON, large_icon)
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, large_icon)
+                    if small_icon:
+                        user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, small_icon)
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small_icon)
                     user32.SetWindowPos(
                         hwnd,
                         0,
@@ -377,7 +387,7 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
                 engine.window.set_position(pos_x, pos_y)
             except Exception:
                 pass
-        apply_windows_window_icon_later(window_title)
+        apply_windows_window_icon_later()
         try:
             engine.scene.add(model_path)
         except RuntimeError as e:

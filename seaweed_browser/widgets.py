@@ -18,6 +18,23 @@ from .i18n import tr
 from .resources import get_app_window_icon
 
 
+class TaskbarPreviewDialog(QDialog):
+    """Independent preview window that owns a Windows taskbar button."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        # A QDialog with a parent is an owned window on Windows.  Owned windows
+        # minimize to the desktop corner together with their owner and do not
+        # receive an independent taskbar button.  MainWindow already retains
+        # and closes previews explicitly, so no QObject parent is required.
+        super().__init__(
+            None,
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint,
+        )
+        self.setWindowIcon(get_app_window_icon())
+
+
 class SortableTreeWidgetItem(QTreeWidgetItem):
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         tree = self.treeWidget()
@@ -31,7 +48,7 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
         return left < right
 
 
-class PreviewDialog(QDialog):
+class PreviewDialog(TaskbarPreviewDialog):
     def __init__(
         self,
         title: str,
@@ -65,7 +82,6 @@ class PreviewDialog(QDialog):
         layout.addWidget(text)
         layout.addWidget(buttons)
         self.setLayout(layout)
-        self.setWindowIcon(get_app_window_icon())
 
     def handle_save_as(self) -> None:
         if self._on_save_as is not None:
@@ -173,7 +189,7 @@ class ImagePreviewArea(QScrollArea):
         super().mouseReleaseEvent(event)
 
 
-class ImagePreviewDialog(QDialog):
+class ImagePreviewDialog(TaskbarPreviewDialog):
     def __init__(
         self,
         title: str,
@@ -184,7 +200,6 @@ class ImagePreviewDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(960, 720)
-        self.setWindowIcon(get_app_window_icon())
         self._on_save_as = on_save_as
         self._pixmap = QPixmap(image_path)
         if self._pixmap.isNull():
@@ -241,12 +256,11 @@ class ImagePreviewDialog(QDialog):
         self.update_info_label()
 
 
-class EntryDetailDialog(QDialog):
+class EntryDetailDialog(TaskbarPreviewDialog):
     def __init__(self, title: str, details_text: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(920, 680)
-        self.setWindowIcon(get_app_window_icon())
 
         text = QPlainTextEdit(self)
         text.setReadOnly(True)

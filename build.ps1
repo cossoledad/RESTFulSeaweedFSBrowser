@@ -73,9 +73,11 @@ $args = @(
     "main.py"
 )
 
-$f3dBinFiles = Get-ChildItem -Path $F3dBinDir -File
+$ResolvedF3dBinDir = (Resolve-Path $F3dBinDir).Path
+$f3dBinFiles = Get-ChildItem -Path $ResolvedF3dBinDir -File -Recurse
 foreach ($f3dBinFile in $f3dBinFiles) {
-    $args += "--include-data-files=$($f3dBinFile.FullName)=f3d/bin/$($f3dBinFile.Name)"
+    $relativeBinPath = $f3dBinFile.FullName.Substring($ResolvedF3dBinDir.Length).TrimStart("\", "/").Replace("\", "/")
+    $args += "--include-data-files=$($f3dBinFile.FullName)=f3d/bin/$relativeBinPath"
 }
 $args += "--include-data-dir=$F3dShareDir=f3d/share"
 

@@ -91,6 +91,7 @@ from seaweed_browser.widgets import (
 
 
 WINDOW_ICON_HANDLES: List[int] = []
+F3D_DLL_DIRECTORY_HANDLES: List[Any] = []
 F3D_RUNTIME_DLL_NAMES = ["f3d.dll", "vcruntime140.dll", "zlib.dll"]
 
 
@@ -105,6 +106,13 @@ def open_path_in_file_explorer(path: str) -> None:
 
 def get_preview_runtime_args() -> List[str]:
     if is_bundled_app():
+        # In some frozen runtimes ``sys.executable`` still refers to the Python
+        # launcher used during compilation.  argv[0] is the executable the user
+        # actually started, so retain it as a fallback for relocated releases.
+        candidates = [sys.executable, os.path.abspath(sys.argv[0])]
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return [candidate]
         return [sys.executable]
     return [sys.executable, os.path.abspath(__file__)]
 
@@ -128,6 +136,27 @@ def ensure_f3d_runtime_layout() -> None:
 
     if not copied_any and not os.listdir(f3d_bin_dir):
         shutil.rmtree(os.path.join(base_dir, "f3d"), ignore_errors=True)
+
+
+def configure_f3d_dll_search_path() -> None:
+    """Make bundled F3D and its dependent DLLs discoverable on Windows."""
+    if not sys.platform.startswith("win"):
+        return
+    f3d_bin_dir = os.path.join(get_base_dir(), "f3d", "bin")
+    if not os.path.isdir(f3d_bin_dir):
+        return
+
+    current_path = os.environ.get("PATH", "")
+    path_entries = current_path.split(os.pathsep) if current_path else []
+    if os.path.normcase(f3d_bin_dir) not in {
+        os.path.normcase(entry) for entry in path_entries
+    }:
+        os.environ["PATH"] = f3d_bin_dir + os.pathsep + current_path
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is not None and not F3D_DLL_DIRECTORY_HANDLES:
+        # The returned handle must live for as long as f3d can load plugins.
+        F3D_DLL_DIRECTORY_HANDLES.append(add_dll_directory(f3d_bin_dir))
 
 
 def load_windows_app_icon_handle() -> int:
@@ -159,6 +188,8 @@ def load_windows_app_icon_handle() -> int:
 
 
 def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
+    ensure_f3d_runtime_layout()
+    configure_f3d_dll_search_path()
     args = get_preview_runtime_args() + ["--f3d-preview", model_path, "--cleanup-dir", cleanup_dir]
     popen_kwargs: Dict[str, Any] = {}
     if sys.platform.startswith("win"):
@@ -180,12 +211,19 @@ def apply_windows_window_icon_later() -> None:
         ICON_BIG = 1
         GCLP_HICON = -14
         GCLP_HICONSM = -34
+        GWL_EXSTYLE = -20
+        GWLP_HWNDPARENT = -8
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_FRAMECHANGED = 0x0020
 
         target_pid = kernel32.GetCurrentProcessId()
         icon_handle = load_windows_app_icon_handle()
-        if not icon_handle:
-            return
-        WINDOW_ICON_HANDLES.append(icon_handle)
+        if icon_handle:
+            WINDOW_ICON_HANDLES.append(icon_handle)
 
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         hwnd_list: List[int] = []
@@ -204,10 +242,27 @@ def apply_windows_window_icon_later() -> None:
             user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
             if hwnd_list:
                 for hwnd in hwnd_list:
-                    user32.SetClassLongPtrW(hwnd, GCLP_HICON, icon_handle)
-                    user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, icon_handle)
-                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
-                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
+                    # F3D/VTK can create an owned tool window, which Windows
+                    # minimizes onto the desktop instead of the taskbar.  Turn
+                    # it into a regular top-level application window.
+                    ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                    ex_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+                    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+                    user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
+                    if icon_handle:
+                        user32.SetClassLongPtrW(hwnd, GCLP_HICON, icon_handle)
+                        user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, icon_handle)
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
+                    user32.SetWindowPos(
+                        hwnd,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                    )
             time.sleep(0.2)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -215,6 +270,7 @@ def apply_windows_window_icon_later() -> None:
 
 def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
     ensure_f3d_runtime_layout()
+    configure_f3d_dll_search_path()
     try:
         import f3d
     except ImportError:
@@ -273,6 +329,8 @@ def check_f3d_runtime() -> int:
         )
         return 1
 
+    ensure_f3d_runtime_layout()
+    configure_f3d_dll_search_path()
     try:
         import f3d
     except Exception as e:

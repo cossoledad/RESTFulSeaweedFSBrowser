@@ -24,6 +24,14 @@ class ReleaseContractTests(unittest.TestCase):
             re.compile(r"github\.ref == 'refs/heads/(main|master)'"),
         )
 
+    def test_f3d_runtime_files_are_packaged_recursively(self) -> None:
+        build_script = Path("build.ps1").read_text(encoding="utf-8")
+        self.assertIn(
+            "Get-ChildItem -Path $ResolvedF3dBinDir -File -Recurse",
+            build_script,
+        )
+        self.assertIn("=f3d/bin/$relativeBinPath", build_script)
+
 
 if __name__ == "__main__":
     unittest.main()

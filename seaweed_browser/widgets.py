@@ -19,11 +19,14 @@ from .resources import get_app_window_icon
 
 
 def configure_preview_window(dialog: QDialog) -> None:
-    """Give an owned preview its own native top-level taskbar window."""
+    """Detach an owned preview so Windows gives it an independent taskbar item."""
     flags = dialog.windowFlags()
-    dialog.setWindowFlags(
-        (flags & ~Qt.WindowType.WindowType_Mask) | Qt.WindowType.Window
-    )
+    flags = (flags & ~Qt.WindowType.WindowType_Mask) | Qt.WindowType.Window
+    flags |= Qt.WindowType.WindowCloseButtonHint
+    # Changing only WindowType_Mask does not remove the native owner created
+    # from ``parent``.  An owned Windows window is deliberately omitted from
+    # the taskbar, so detach it while MainWindow retains the Python reference.
+    dialog.setParent(None, flags)
     dialog.setWindowIcon(get_app_window_icon())
 
 

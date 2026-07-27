@@ -29,6 +29,8 @@ class PreviewWindowQtTests(unittest.TestCase):
     def assert_is_taskbar_window(self, window) -> None:
         base_type = window.windowFlags() & Qt.WindowType.WindowType_Mask
         self.assertEqual(base_type, Qt.WindowType.Window)
+        self.assertIsNone(window.parentWidget())
+        self.assertTrue(window.windowFlags() & Qt.WindowType.WindowCloseButtonHint)
         self.assertFalse(window.windowIcon().isNull())
 
     def test_text_preview_is_a_top_level_window(self) -> None:

@@ -669,6 +669,15 @@ Onefile：
 
 构建脚本通过 PySide6 插件打包 Qt Quick 3D 运行模块，并将 `resource/model_preview.qml` 随应用发布。
 
+### 日志与模型预览排障
+
+- 主程序日志位于 `%APPDATA%/SeaweedFSBrowser/logs/application.log`。
+- 每次模型预览会创建独立的 `model-preview-*.log`，其中包含 Qt、QML、
+  RuntimeLoader 和 Python 异常信息。
+- 模型加载失败或预览进程异常退出时，界面会显示具体错误或对应日志文件路径。
+- Windows 发布包会包含全部 Qt 插件，以确保 Qt Quick 3D 的 GLB/GLTF importer
+  不会在 Nuitka 打包时被遗漏。
+
 ### CI 与 Release
 
 ```mermaid

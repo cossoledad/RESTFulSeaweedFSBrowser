@@ -27,7 +27,7 @@ class ReleaseContractTests(unittest.TestCase):
     def test_model_preview_uses_packaged_qt_quick_resource(self) -> None:
         build_script = Path("build.ps1").read_text(encoding="utf-8")
         self.assertIn("--include-data-dir=resource=resource", build_script)
-        self.assertIn("--include-qt-plugins=qml", build_script)
+        self.assertIn("--include-qt-plugins=all", build_script)
         self.assertNotIn("--include-package=f3d", build_script)
         self.assertTrue(Path("resource/model_preview.qml").is_file())
 
@@ -36,6 +36,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("class ModelPreviewWindow(QMainWindow):", main_source)
         self.assertIn("self.setWindowIcon(get_app_window_icon())", main_source)
         self.assertIn("viewer = QQuickWidget(self)", main_source)
+        self.assertIn("configure_logging(", main_source)
+        self.assertIn("root.modelLoadFailed.connect", main_source)
         self.assertNotIn("import f3d", main_source)
         self.assertNotIn("SetParent", main_source)
 

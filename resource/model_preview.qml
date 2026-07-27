@@ -4,6 +4,10 @@ import QtQuick3D.AssetUtils
 import QtQuick3D.Helpers
 
 Rectangle {
+    signal modelLoadFailed(string error)
+    property alias modelStatus: modelLoader.status
+    property alias modelError: modelLoader.errorString
+
     color: "#202124"
 
     View3D {
@@ -37,6 +41,13 @@ Rectangle {
             source: modelSourceUrl
             property bool normalized: false
 
+            onStatusChanged: {
+                if (status === RuntimeLoader.Error) {
+                    console.error("Model loading failed: " + errorString)
+                    modelLoadFailed(errorString)
+                }
+            }
+
             onBoundsChanged: {
                 if (normalized)
                     return
@@ -62,5 +73,15 @@ Rectangle {
         anchors.fill: parent
         origin: modelLoader
         camera: camera
+    }
+
+    Text {
+        anchors.centerIn: parent
+        width: parent.width * 0.8
+        visible: modelLoader.status === RuntimeLoader.Error
+        color: "#ff8a80"
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.Wrap
+        text: modelLoader.errorString
     }
 }

@@ -39,7 +39,7 @@ if (Test-Path $PngIcon) {
 $args = @(
     "-m", "nuitka",
     "--enable-plugin=pyside6",
-    "--include-qt-plugins=qml",
+    "--include-qt-plugins=all",
     "--assume-yes-for-downloads",
     "--windows-console-mode=disable",
     "--windows-icon-from-ico=$IcoIcon",

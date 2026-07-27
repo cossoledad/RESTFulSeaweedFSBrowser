@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import random
 import shutil
@@ -62,6 +63,7 @@ from seaweed_browser.i18n import (
     set_language,
     tr,
 )
+from seaweed_browser.logging_config import configure_logging, get_log_dir
 from seaweed_browser.tasks import (
     CreateDirectoryWorker,
     DirectoryLoadWorker,
@@ -114,12 +116,15 @@ def get_preview_runtime_args() -> List[str]:
 def launch_model_preview_subprocess(
     model_path: str,
     cleanup_dir: str,
-) -> subprocess.Popen:
+) -> tuple[subprocess.Popen, str]:
+    log_path = os.path.join(get_log_dir(), f"model-preview-{os.getpid()}-{random.randrange(1_000_000):06d}.log")
     args = get_preview_runtime_args() + [
         "--model-preview",
         model_path,
         "--cleanup-dir",
         cleanup_dir,
+        "--log-file",
+        log_path,
     ]
     popen_kwargs: Dict[str, Any] = {}
     if sys.platform.startswith("win"):
@@ -128,7 +133,7 @@ def launch_model_preview_subprocess(
             "CREATE_NEW_PROCESS_GROUP",
             0,
         )
-    return subprocess.Popen(args, **popen_kwargs)
+    return subprocess.Popen(args, **popen_kwargs), log_path
 
 
 class ModelPreviewWindow(QMainWindow):
@@ -136,6 +141,9 @@ class ModelPreviewWindow(QMainWindow):
 
     def __init__(self, model_path: str):
         super().__init__()
+        self._logger = logging.getLogger("model_preview")
+        self._load_failed = False
+        self._logger.info("Loading model: %s", model_path)
         self.setWindowTitle(f"{APP_NAME} - {tr('模型预览')}")
         self.setWindowIcon(get_app_window_icon())
         self.resize(960, 720)
@@ -152,7 +160,29 @@ class ModelPreviewWindow(QMainWindow):
         if viewer.status() == QQuickWidget.Status.Error:
             errors = "\n".join(error.toString() for error in viewer.errors())
             raise RuntimeError(tr("模型预览初始化失败: {error}", error=errors))
+        root = viewer.rootObject()
+        if root is not None:
+            root.modelLoadFailed.connect(self.handle_model_load_failed)
+            if root.property("modelStatus") == 3:
+                QTimer.singleShot(
+                    0,
+                    lambda: self.handle_model_load_failed(
+                        str(root.property("modelError"))
+                    ),
+                )
         self.setCentralWidget(viewer)
+
+    def handle_model_load_failed(self, error: str) -> None:
+        if self._load_failed:
+            return
+        self._load_failed = True
+        self._logger.error("GLB/GLTF loading failed: %s", error)
+        QMessageBox.critical(
+            self,
+            tr("模型预览失败"),
+            tr("模型加载失败，请查看日志。\n\n{error}", error=error),
+        )
+        QApplication.exit(2)
 
 
 def run_model_preview(model_path: str, cleanup_dir: str = "") -> int:
@@ -171,6 +201,7 @@ def run_model_preview(model_path: str, cleanup_dir: str = "") -> int:
 class ModelPreviewProcess:
     process: subprocess.Popen
     temp_dir: str
+    log_path: str
 
 
 def ask_yes_no(
@@ -1168,10 +1199,14 @@ class MainWindow(QMainWindow):
                 )
                 temp_dir = ""
             elif preview_type == "model":
-                process = launch_model_preview_subprocess(local_path, temp_dir)
+                process, log_path = launch_model_preview_subprocess(
+                    local_path,
+                    temp_dir,
+                )
                 self._model_preview_processes[preview_key] = ModelPreviewProcess(
                     process=process,
                     temp_dir=temp_dir,
+                    log_path=log_path,
                 )
                 temp_dir = ""
             else:
@@ -1213,10 +1248,21 @@ class MainWindow(QMainWindow):
 
     def reap_model_preview_processes(self) -> None:
         for preview_key, record in list(self._model_preview_processes.items()):
-            if record.process.poll() is None:
+            return_code = record.process.poll()
+            if return_code is None:
                 continue
             self._model_preview_processes.pop(preview_key, None)
             shutil.rmtree(record.temp_dir, ignore_errors=True)
+            if return_code != 0 and not self._closing_after_task_cancel:
+                QMessageBox.critical(
+                    self,
+                    tr("模型预览失败"),
+                    tr(
+                        "模型预览进程异常退出（代码 {code}）。\n日志文件：{path}",
+                        code=return_code,
+                        path=record.log_path,
+                    ),
+                )
 
     def terminate_model_preview_processes(self) -> None:
         for record in list(self._model_preview_processes.values()):
@@ -1514,8 +1560,19 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    log_file = ""
+    if "--log-file" in sys.argv:
+        log_index = sys.argv.index("--log-file")
+        if log_index + 1 < len(sys.argv):
+            log_file = sys.argv[log_index + 1]
+    is_model_preview = len(sys.argv) >= 3 and sys.argv[1] == "--model-preview"
+    configure_logging(
+        "model-preview" if is_model_preview else "application",
+        log_file or None,
+    )
+    logging.getLogger(__name__).info("Startup arguments: %s", sys.argv[1:])
     set_language(load_config().language)
-    if len(sys.argv) >= 3 and sys.argv[1] == "--model-preview":
+    if is_model_preview:
         model_path = sys.argv[2]
         cleanup_dir = ""
         if len(sys.argv) >= 5 and sys.argv[3] == "--cleanup-dir":

@@ -205,6 +205,7 @@ class F3DPreviewHost(QMainWindow):
             GWL_STYLE = -16
             WS_CHILD = 0x40000000
             WS_VISIBLE = 0x10000000
+            WS_POPUP = 0x80000000
             WS_CAPTION = 0x00C00000
             WS_THICKFRAME = 0x00040000
             WS_MINIMIZEBOX = 0x00020000
@@ -225,6 +226,8 @@ class F3DPreviewHost(QMainWindow):
             user32.IsWindowVisible.restype = wintypes.BOOL
             user32.SetParent.argtypes = [wintypes.HWND, wintypes.HWND]
             user32.SetParent.restype = wintypes.HWND
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
             user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
             user32.GetWindowLongPtrW.restype = LONG_PTR
             user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
@@ -243,6 +246,18 @@ class F3DPreviewHost(QMainWindow):
                 wintypes.BOOL,
             ]
             user32.MoveWindow.restype = wintypes.BOOL
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindow.restype = wintypes.BOOL
 
             target_pid = kernel32.GetCurrentProcessId()
             matches: List[int] = []
@@ -267,28 +282,43 @@ class F3DPreviewHost(QMainWindow):
                 user32.EnumWindows(callback, 0)
                 if matches:
                     child_hwnd = matches[0]
-                    user32.SetParent(child_hwnd, container_hwnd)
-                    style = user32.GetWindowLongPtrW(child_hwnd, GWL_STYLE)
-                    style &= ~(
+                    original_style = user32.GetWindowLongPtrW(child_hwnd, GWL_STYLE)
+                    child_style = original_style & ~(
                         WS_CAPTION
                         | WS_THICKFRAME
                         | WS_MINIMIZEBOX
                         | WS_MAXIMIZEBOX
                         | WS_SYSMENU
+                        | WS_POPUP
                     )
-                    style |= WS_CHILD | WS_VISIBLE
-                    user32.SetWindowLongPtrW(child_hwnd, GWL_STYLE, style)
+                    child_style |= WS_CHILD | WS_VISIBLE
+                    # Win32 requires callers to change WS_POPUP/WS_CHILD
+                    # themselves when SetParent crosses top-level/child roles.
+                    user32.SetWindowLongPtrW(child_hwnd, GWL_STYLE, child_style)
+                    user32.SetParent(child_hwnd, container_hwnd)
+                    if int(user32.GetParent(child_hwnd) or 0) != container_hwnd:
+                        user32.SetWindowLongPtrW(
+                            child_hwnd,
+                            GWL_STYLE,
+                            original_style,
+                        )
+                        time.sleep(0.05)
+                        continue
                     self._f3d_hwnd = child_hwnd
                     area = wintypes.RECT()
                     user32.GetClientRect(container_hwnd, ctypes.byref(area))
-                    user32.MoveWindow(
+                    user32.SetWindowPos(
                         child_hwnd,
+                        0,
                         0,
                         0,
                         area.right - area.left,
                         area.bottom - area.top,
-                        True,
+                        0x0020 | 0x0040,
                     )
+                    # Keep the Qt frame hidden until F3D is confirmed as its
+                    # child. This prevents the failed-attachment two-window UX.
+                    user32.ShowWindow(host_hwnd, 5)
                     return
                 time.sleep(0.05)
 
@@ -351,7 +381,6 @@ def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
                 screen.center().x() - host.width() // 2,
                 screen.center().y() - host.height() // 2,
             )
-            host.show()
             qt_app.processEvents()
             host.attach_f3d_window_later()
         try:

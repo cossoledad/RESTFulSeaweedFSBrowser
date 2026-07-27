@@ -37,6 +37,9 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("class F3DPreviewHost(QMainWindow):", main_source)
         self.assertIn("self.setWindowIcon(get_app_window_icon())", main_source)
         self.assertIn("user32.SetParent(child_hwnd, container_hwnd)", main_source)
+        self.assertIn("user32.GetParent(child_hwnd)", main_source)
+        self.assertIn("user32.ShowWindow(host_hwnd, 5)", main_source)
+        self.assertNotIn("host.show()", main_source)
         self.assertIn("host.attach_f3d_window_later()", main_source)
 
 

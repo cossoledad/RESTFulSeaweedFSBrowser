@@ -198,6 +198,7 @@ def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subproce
 
 
 def apply_windows_window_icon_later() -> None:
+    """Promote the F3D native window and apply the application icon."""
     if not sys.platform.startswith("win"):
         return
 

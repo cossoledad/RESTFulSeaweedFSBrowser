@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick3D
 import QtQuick3D.AssetUtils
-import QtQuick3D.Helpers
 
 Rectangle {
     signal modelLoadFailed(string error)
@@ -22,9 +21,18 @@ Rectangle {
             antialiasingQuality: SceneEnvironment.High
         }
 
-        PerspectiveCamera {
-            id: camera
-            z: 300
+        Node {
+            id: cameraOrigin
+            property real pitch: 0
+            property real yaw: 0
+            eulerRotation: Qt.vector3d(pitch, yaw, 0)
+
+            PerspectiveCamera {
+                id: camera
+                z: 300
+                clipNear: 0.1
+                clipFar: 100000
+            }
         }
 
         DirectionalLight {
@@ -72,10 +80,58 @@ Rectangle {
         }
     }
 
-    OrbitCameraController {
+    MouseArea {
+        id: cameraController
         anchors.fill: parent
-        origin: modelLoader
-        camera: camera
+        acceptedButtons: Qt.MiddleButton
+        hoverEnabled: true
+        property real lastX: 0
+        property real lastY: 0
+
+        onPressed: function(mouse) {
+            lastX = mouse.x
+            lastY = mouse.y
+        }
+
+        onPositionChanged: function(mouse) {
+            if (!(mouse.buttons & Qt.MiddleButton))
+                return
+            const dx = mouse.x - lastX
+            const dy = mouse.y - lastY
+            lastX = mouse.x
+            lastY = mouse.y
+            if (mouse.modifiers & Qt.ShiftModifier) {
+                const panScale = camera.z / 600
+                const right = camera.mapDirectionToScene(Qt.vector3d(1, 0, 0))
+                const up = camera.mapDirectionToScene(Qt.vector3d(0, 1, 0))
+                cameraOrigin.x += (-right.x * dx + up.x * dy) * panScale
+                cameraOrigin.y += (-right.y * dx + up.y * dy) * panScale
+                cameraOrigin.z += (-right.z * dx + up.z * dy) * panScale
+            } else {
+                cameraOrigin.yaw -= dx * 0.35
+                cameraOrigin.pitch = Math.max(
+                    -89,
+                    Math.min(89, cameraOrigin.pitch - dy * 0.35)
+                )
+            }
+        }
+
+        onWheel: function(wheel) {
+            const zoomFactor = Math.pow(1.0015, -wheel.angleDelta.y)
+            camera.z = Math.max(10, Math.min(100000, camera.z * zoomFactor))
+            wheel.accepted = true
+        }
+
+        onDoubleClicked: function(mouse) {
+            if (mouse.button !== Qt.MiddleButton)
+                return
+            cameraOrigin.x = 0
+            cameraOrigin.y = 0
+            cameraOrigin.z = 0
+            cameraOrigin.pitch = 0
+            cameraOrigin.yaw = 0
+            camera.z = 300
+        }
     }
 
     Text {
@@ -86,5 +142,23 @@ Rectangle {
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
         text: modelLoader.errorString
+    }
+
+    Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 14
+        width: controlsText.implicitWidth + 24
+        height: controlsText.implicitHeight + 12
+        radius: 5
+        color: "#b3000000"
+        visible: modelLoader.status !== RuntimeLoader.Error
+
+        Text {
+            id: controlsText
+            anchors.centerIn: parent
+            color: "#eeeeee"
+            text: modelControlsHint
+        }
     }
 }

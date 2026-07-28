@@ -154,6 +154,10 @@ class ModelPreviewWindow(QMainWindow):
             "modelSourceUrl",
             QUrl.fromLocalFile(os.path.abspath(model_path)),
         )
+        viewer.rootContext().setContextProperty(
+            "modelControlsHint",
+            tr("中键拖动旋转 · Shift+中键平移 · 滚轮缩放 · 中键双击重置视角"),
+        )
         viewer.setSource(
             QUrl.fromLocalFile(get_resource_path("resource/model_preview.qml"))
         )

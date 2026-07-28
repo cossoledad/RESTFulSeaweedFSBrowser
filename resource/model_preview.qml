@@ -5,8 +5,11 @@ import QtQuick3D.Helpers
 
 Rectangle {
     signal modelLoadFailed(string error)
-    property alias modelStatus: modelLoader.status
-    property alias modelError: modelLoader.errorString
+
+    function reportCurrentModelError() {
+        if (modelLoader.status === RuntimeLoader.Error)
+            modelLoadFailed(modelLoader.errorString)
+    }
 
     color: "#202124"
 

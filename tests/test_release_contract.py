@@ -38,6 +38,8 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("viewer = QQuickWidget(self)", main_source)
         self.assertIn("configure_logging(", main_source)
         self.assertIn("root.modelLoadFailed.connect", main_source)
+        self.assertIn("root.reportCurrentModelError", main_source)
+        self.assertNotIn('root.property("modelStatus")', main_source)
         self.assertNotIn("import f3d", main_source)
         self.assertNotIn("SetParent", main_source)
 

@@ -163,13 +163,7 @@ class ModelPreviewWindow(QMainWindow):
         root = viewer.rootObject()
         if root is not None:
             root.modelLoadFailed.connect(self.handle_model_load_failed)
-            if root.property("modelStatus") == 3:
-                QTimer.singleShot(
-                    0,
-                    lambda: self.handle_model_load_failed(
-                        str(root.property("modelError"))
-                    ),
-                )
+            QTimer.singleShot(0, root.reportCurrentModelError)
         self.setCentralWidget(viewer)
 
     def handle_model_load_failed(self, error: str) -> None:

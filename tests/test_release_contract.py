@@ -24,13 +24,30 @@ class ReleaseContractTests(unittest.TestCase):
             re.compile(r"github\.ref == 'refs/heads/(main|master)'"),
         )
 
-    def test_f3d_runtime_files_are_packaged_recursively(self) -> None:
+    def test_model_preview_uses_packaged_qt_quick_resource(self) -> None:
         build_script = Path("build.ps1").read_text(encoding="utf-8")
-        self.assertIn(
-            "Get-ChildItem -Path $ResolvedF3dBinDir -File -Recurse",
-            build_script,
-        )
-        self.assertIn("=f3d/bin/$relativeBinPath", build_script)
+        self.assertIn("--include-data-dir=resource=resource", build_script)
+        self.assertIn("--include-qt-plugins=all", build_script)
+        self.assertNotIn("--include-package=f3d", build_script)
+        self.assertTrue(Path("resource/model_preview.qml").is_file())
+
+    def test_model_preview_is_a_single_qt_quick_window(self) -> None:
+        main_source = Path("main.py").read_text(encoding="utf-8")
+        self.assertIn("class ModelPreviewWindow(QMainWindow):", main_source)
+        self.assertIn("self.setWindowIcon(get_app_window_icon())", main_source)
+        self.assertIn("viewer = QQuickWidget(self)", main_source)
+        self.assertIn("configure_logging(", main_source)
+        self.assertIn("root.modelLoadFailed.connect", main_source)
+        self.assertIn("root.reportCurrentModelError", main_source)
+        qml_source = Path("resource/model_preview.qml").read_text(encoding="utf-8")
+        self.assertIn("acceptedButtons: Qt.MiddleButton", qml_source)
+        self.assertIn("mouse.modifiers & Qt.ShiftModifier", qml_source)
+        self.assertIn("onWheel: function(wheel)", qml_source)
+        self.assertIn("onDoubleClicked: function(mouse)", qml_source)
+        self.assertNotIn("OrbitCameraController", qml_source)
+        self.assertNotIn('root.property("modelStatus")', main_source)
+        self.assertNotIn("import f3d", main_source)
+        self.assertNotIn("SetParent", main_source)
 
 
 if __name__ == "__main__":

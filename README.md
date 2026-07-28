@@ -14,7 +14,7 @@
   · Python 3.12
   · PySide6
   · Nuitka
-  · F3D
+  · Qt Quick 3D
 </p>
 
 当前版本：`1.0.14`
@@ -46,12 +46,11 @@
 SeaweedFSBrowser-v<版本>-windows-x64-standalone.zip
 ```
 
-解压后直接运行 `SeaweedFSBrowser.exe`。发布包已经包含 Python、PySide6 和 F3D
-运行环境。
+解压后直接运行 `SeaweedFSBrowser.exe`。发布包已经包含 Python、PySide6 和 Qt Quick 3D 模型预览环境。
 
 > [!IMPORTANT]
 > 仓库首页的 `Code → Download ZIP` 和 Release 中自动生成的 `Source code`
-> 仅包含源代码，不包含可直接运行的 F3D 环境。
+> 仅包含源代码，不包含可直接运行的打包环境。
 
 ### 从源码运行
 
@@ -96,7 +95,7 @@ flowchart TB
     Orchestrator["用例编排<br/>参数校验 / 去重 / 结果分发"]
     Runtime["任务运行时<br/>TaskManager / QThread / 状态快照"]
     Workers["业务任务<br/>Load / Upload / Download / Preview"]
-    Infra["基础设施<br/>SeaweedClient / F3D / 文件系统"]
+    Infra["基础设施<br/>SeaweedClient / Qt Quick 3D / 文件系统"]
 
     UI --> Orchestrator
     Orchestrator --> Runtime
@@ -235,7 +234,7 @@ flowchart TD
 - `CancellationToken` 基于 `threading.Event`，可安全跨线程读取。
 - 流式上传、下载、分页扫描和模型资源下载都会在循环中检查取消状态。
 - 主窗口关闭时如果仍有活动任务，会先禁用界面、取消全部任务并忽略本次关闭事件。
-- `all_finished` 到达后再次关闭，随后终止仍存活的 F3D 子进程并清理临时目录。
+- `all_finished` 到达后再次关闭，随后终止仍存活的模型预览子进程并清理临时目录。
 
 ## 状态与进度展示
 
@@ -291,14 +290,14 @@ flowchart TB
     Dock["TaskCenterDock<br/>可停靠、可隐藏"]
     Native["非模态 Qt 预览<br/>文本 / 图片 / 详细信息"]
     Loader["PreviewLoadWorker<br/>后台准备数据"]
-    F3D["独立 F3D 子进程<br/>GLB / GLTF"]
+    Model["独立 Qt Quick 3D 子进程<br/>GLB / GLTF"]
 
     Main --> Dock
     Main --> Loader
     Loader --> Native
-    Loader --> F3D
+    Loader --> Model
     Native -.保持主窗口可用.-> Main
-    F3D -.独立生命周期.-> Main
+    Model -.独立生命周期.-> Main
 ```
 
 ### 为什么预览不会阻塞主窗口
@@ -320,7 +319,7 @@ sequenceDiagram
     participant UI as MainWindow
     participant WK as PreviewLoadWorker
     participant FS as 临时目录
-    participant F3D as F3D 子进程
+    participant Model as Qt Quick 3D 子进程
 
     UI->>WK: 启动 model 预览任务
     WK->>FS: 下载模型并识别真实格式
@@ -328,14 +327,16 @@ sequenceDiagram
         WK->>FS: 解析并下载 buffers/images
     end
     WK-->>UI: local_path + temp_dir
-    UI->>F3D: --f3d-preview
-    F3D-->>UI: 独立窗口与进程状态
+    UI->>Model: --model-preview
+    Model-->>UI: 单一 Qt 窗口与进程状态
 ```
 
 - 通过文件头识别 GLB/GLTF，而不是只相信扩展名。
 - GLTF 的相对 `buffers` 和 `images` 会按原目录结构下载。
 - `data:` URI 和外部 URL 不重复下载。
 - 所有相对资源都经过本地路径边界校验，阻止 `../` 逃逸。
+- 模型窗口采用常见三维设计软件的相机操作：中键拖动旋转、`Shift+中键`
+  平移、滚轮缩放，中键双击恢复默认视角。
 - 主进程每秒回收已结束的模型预览进程；退出时统一终止剩余进程。
 
 普通输入框、确认框、文件选择器仍可使用短生命周期模态对话框，因为它们只收集一次
@@ -437,7 +438,7 @@ flowchart LR
 
 | 路径 | 作用 |
 | --- | --- |
-| `main.py` | 应用入口、主窗口、用例编排、结果路由、F3D 子进程入口 |
+| `main.py` | 应用入口、主窗口、用例编排、结果路由、模型预览子进程入口 |
 | `seaweed_browser/core.py` | 版本、配置、路径校验、URL、格式化规则 |
 | `seaweed_browser/i18n.py` | 语言状态、中文回退、英文和法文翻译目录 |
 | `seaweed_browser/client.py` | SeaweedFS HTTP、分页、流式上传和原子下载 |
@@ -454,7 +455,7 @@ flowchart LR
 | `seaweed_browser/cancellation.py` | 线程安全取消令牌 |
 | `seaweed_browser/resources.py` | 开发与 Nuitka 环境下的资源路径 |
 | `tests/` | 核心、网络、并发、任务、i18n 和发布契约测试 |
-| `build.ps1` | Nuitka standalone/onefile 构建与 F3D 运行时校验 |
+| `build.ps1` | Nuitka standalone/onefile 构建与 Qt 资源打包 |
 | `.github/workflows/ci.yml` | Linux 语法/单测、Windows PySide6 测试和 Nuitka 发布流程 |
 | `release-notes/` | 按版本保存的 Release 说明 |
 
@@ -590,7 +591,7 @@ tr("删除文件：{name}", name=file_name)
 2. 在 `PreviewLoadWorker.run()` 中后台下载和准备数据。
 3. 在 `on_preview_load_finished()` 中只进行快速的 UI 构造。
 4. 用 `show_preview_window()` 注册非模态窗口，复用去重、激活和销毁清理。
-5. 如果使用外部进程，仿照 F3D 保存进程与临时目录，并在定时回收和退出路径清理。
+5. 如果使用外部进程，仿照模型预览保存进程与临时目录，并在定时回收和退出路径清理。
 6. 为新类型设置合理的临时文件、大小和并发限制。
 
 ### 新增一种语言
@@ -668,13 +669,16 @@ Onefile：
 .\build.ps1 -Mode onefile
 ```
 
-构建脚本会检查 F3D Python 扩展、DLL 和资源目录，并在生成发布包后执行：
+构建脚本通过 PySide6 插件打包 Qt Quick 3D 运行模块，并将 `resource/model_preview.qml` 随应用发布。
 
-```powershell
-SeaweedFSBrowser.exe --check-f3d-runtime
-```
+### 日志与模型预览排障
 
-只有 F3D 导入和打包程序的模型预览子进程参数都通过自检，构建才会成功。
+- 主程序日志位于 `%APPDATA%/SeaweedFSBrowser/logs/application.log`。
+- 每次模型预览会创建独立的 `model-preview-*.log`，其中包含 Qt、QML、
+  RuntimeLoader 和 Python 异常信息。
+- 模型加载失败或预览进程异常退出时，界面会显示具体错误或对应日志文件路径。
+- Windows 发布包会包含全部 Qt 插件，以确保 Qt Quick 3D 的 GLB/GLTF importer
+  不会在 Nuitka 打包时被遗漏。
 
 ### CI 与 Release
 

@@ -18,6 +18,18 @@ from .i18n import tr
 from .resources import get_app_window_icon
 
 
+def configure_preview_window(dialog: QDialog) -> None:
+    """Detach an owned preview so Windows gives it an independent taskbar item."""
+    flags = dialog.windowFlags()
+    flags = (flags & ~Qt.WindowType.WindowType_Mask) | Qt.WindowType.Window
+    flags |= Qt.WindowType.WindowCloseButtonHint
+    # Changing only WindowType_Mask does not remove the native owner created
+    # from ``parent``.  An owned Windows window is deliberately omitted from
+    # the taskbar, so detach it while MainWindow retains the Python reference.
+    dialog.setParent(None, flags)
+    dialog.setWindowIcon(get_app_window_icon())
+
+
 class SortableTreeWidgetItem(QTreeWidgetItem):
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         tree = self.treeWidget()
@@ -40,6 +52,7 @@ class PreviewDialog(QDialog):
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
+        configure_preview_window(self)
         self.setWindowTitle(title)
         self.resize(900, 600)
         self._on_save_as = on_save_as
@@ -65,7 +78,6 @@ class PreviewDialog(QDialog):
         layout.addWidget(text)
         layout.addWidget(buttons)
         self.setLayout(layout)
-        self.setWindowIcon(get_app_window_icon())
 
     def handle_save_as(self) -> None:
         if self._on_save_as is not None:
@@ -182,9 +194,9 @@ class ImagePreviewDialog(QDialog):
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
+        configure_preview_window(self)
         self.setWindowTitle(title)
         self.resize(960, 720)
-        self.setWindowIcon(get_app_window_icon())
         self._on_save_as = on_save_as
         self._pixmap = QPixmap(image_path)
         if self._pixmap.isNull():
@@ -244,9 +256,9 @@ class ImagePreviewDialog(QDialog):
 class EntryDetailDialog(QDialog):
     def __init__(self, title: str, details_text: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        configure_preview_window(self)
         self.setWindowTitle(title)
         self.resize(920, 680)
-        self.setWindowIcon(get_app_window_icon())
 
         text = QPlainTextEdit(self)
         text.setReadOnly(True)

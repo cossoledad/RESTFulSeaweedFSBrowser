@@ -1,19 +1,19 @@
 import json
+import logging
 import os
 import random
 import shutil
 import subprocess
 import sys
-import threading
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 # 减少 Windows 下字体探测产生的大量告警输出。
 os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db.warning=false;qt.qpa.fonts.warning=false")
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QFontDatabase
+from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -38,7 +38,7 @@ from seaweed_browser.core import (
     APP_VERSION,
     MAX_HISTORY,
     PAGE_LIMIT,
-    SUPPORTED_F3D_MODEL_EXTENSIONS,
+    SUPPORTED_MODEL_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS,
     basename,
     format_size,
@@ -63,6 +63,7 @@ from seaweed_browser.i18n import (
     set_language,
     tr,
 )
+from seaweed_browser.logging_config import configure_logging, get_log_dir
 from seaweed_browser.tasks import (
     CreateDirectoryWorker,
     DirectoryLoadWorker,
@@ -79,7 +80,7 @@ from seaweed_browser.uploads import UploadItem, build_upload_items
 from seaweed_browser.resources import (
     get_app_window_icon,
     get_base_dir,
-    get_windows_icon_path,
+    get_resource_path,
     is_bundled_app,
 )
 from seaweed_browser.widgets import (
@@ -88,11 +89,6 @@ from seaweed_browser.widgets import (
     PreviewDialog,
     SortableTreeWidgetItem,
 )
-
-
-WINDOW_ICON_HANDLES: List[int] = []
-F3D_DLL_DIRECTORY_HANDLES: List[Any] = []
-F3D_RUNTIME_DLL_NAMES = ["f3d.dll", "vcruntime140.dll", "zlib.dll"]
 
 
 def open_path_in_file_explorer(path: str) -> None:
@@ -117,243 +113,93 @@ def get_preview_runtime_args() -> List[str]:
     return [sys.executable, os.path.abspath(__file__)]
 
 
-def ensure_f3d_runtime_layout() -> None:
-    if not is_bundled_app():
-        return
-    base_dir = get_base_dir()
-    f3d_bin_dir = os.path.join(base_dir, "f3d", "bin")
-    if os.path.isdir(f3d_bin_dir):
-        return
-
-    copied_any = False
-    os.makedirs(f3d_bin_dir, exist_ok=True)
-    for dll_name in F3D_RUNTIME_DLL_NAMES:
-        source_path = os.path.join(base_dir, dll_name)
-        target_path = os.path.join(f3d_bin_dir, dll_name)
-        if os.path.exists(source_path) and not os.path.exists(target_path):
-            shutil.copy2(source_path, target_path)
-            copied_any = True
-
-    if not copied_any and not os.listdir(f3d_bin_dir):
-        shutil.rmtree(os.path.join(base_dir, "f3d"), ignore_errors=True)
-
-
-def configure_f3d_dll_search_path() -> None:
-    """Make bundled F3D and its dependent DLLs discoverable on Windows."""
-    if not sys.platform.startswith("win"):
-        return
-    f3d_bin_dir = os.path.join(get_base_dir(), "f3d", "bin")
-    if not os.path.isdir(f3d_bin_dir):
-        return
-
-    current_path = os.environ.get("PATH", "")
-    path_entries = current_path.split(os.pathsep) if current_path else []
-    if os.path.normcase(f3d_bin_dir) not in {
-        os.path.normcase(entry) for entry in path_entries
-    }:
-        os.environ["PATH"] = f3d_bin_dir + os.pathsep + current_path
-
-    add_dll_directory = getattr(os, "add_dll_directory", None)
-    if add_dll_directory is not None and not F3D_DLL_DIRECTORY_HANDLES:
-        # The returned handle must live for as long as f3d can load plugins.
-        F3D_DLL_DIRECTORY_HANDLES.append(add_dll_directory(f3d_bin_dir))
-
-
-def load_windows_app_icon_handle() -> int:
-    if not sys.platform.startswith("win"):
-        return 0
-
-    import ctypes
-
-    user32 = ctypes.windll.user32
-    shell32 = ctypes.windll.shell32
-    IMAGE_ICON = 1
-    LR_LOADFROMFILE = 0x0010
-
-    if is_bundled_app():
-        small_icon = ctypes.c_void_p()
-        large_icon = ctypes.c_void_p()
-        extracted = shell32.ExtractIconExW(sys.executable, 0, ctypes.byref(large_icon), ctypes.byref(small_icon), 1)
-        if extracted > 0:
-            handle = large_icon.value or small_icon.value or 0
-            if handle:
-                return int(handle)
-
-    icon_path = get_windows_icon_path()
-    if not icon_path:
-        return 0
-    return int(user32.LoadImageW(None, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE) or 0)
-
-
-
-
-def launch_f3d_preview_subprocess(model_path: str, cleanup_dir: str) -> subprocess.Popen:
-    ensure_f3d_runtime_layout()
-    configure_f3d_dll_search_path()
-    args = get_preview_runtime_args() + ["--f3d-preview", model_path, "--cleanup-dir", cleanup_dir]
+def launch_model_preview_subprocess(
+    model_path: str,
+    cleanup_dir: str,
+) -> tuple[subprocess.Popen, str]:
+    log_path = os.path.join(get_log_dir(), f"model-preview-{os.getpid()}-{random.randrange(1_000_000):06d}.log")
+    args = get_preview_runtime_args() + [
+        "--model-preview",
+        model_path,
+        "--cleanup-dir",
+        cleanup_dir,
+        "--log-file",
+        log_path,
+    ]
     popen_kwargs: Dict[str, Any] = {}
     if sys.platform.startswith("win"):
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return subprocess.Popen(args, **popen_kwargs)
+        popen_kwargs["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
+        )
+    return subprocess.Popen(args, **popen_kwargs), log_path
 
 
-def apply_windows_window_icon_later() -> None:
-    if not sys.platform.startswith("win"):
-        return
+class ModelPreviewWindow(QMainWindow):
+    """Qt Quick 3D GLB/glTF viewer with a normal application-owned frame."""
 
-    def worker() -> None:
-        import ctypes
+    def __init__(self, model_path: str):
+        super().__init__()
+        self._logger = logging.getLogger("model_preview")
+        self._load_failed = False
+        self._logger.info("Loading model: %s", model_path)
+        self.setWindowTitle(f"{APP_NAME} - {tr('模型预览')}")
+        self.setWindowIcon(get_app_window_icon())
+        self.resize(960, 720)
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-        WM_SETICON = 0x0080
-        ICON_SMALL = 0
-        ICON_BIG = 1
-        GCLP_HICON = -14
-        GCLP_HICONSM = -34
-        GWL_EXSTYLE = -20
-        GWLP_HWNDPARENT = -8
-        WS_EX_TOOLWINDOW = 0x00000080
-        WS_EX_APPWINDOW = 0x00040000
-        SWP_NOSIZE = 0x0001
-        SWP_NOMOVE = 0x0002
-        SWP_NOZORDER = 0x0004
-        SWP_FRAMECHANGED = 0x0020
+        viewer = QQuickWidget(self)
+        viewer.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
+        viewer.rootContext().setContextProperty(
+            "modelSourceUrl",
+            QUrl.fromLocalFile(os.path.abspath(model_path)),
+        )
+        viewer.rootContext().setContextProperty(
+            "modelControlsHint",
+            tr("中键拖动旋转 · Shift+中键平移 · 滚轮缩放 · 中键双击重置视角"),
+        )
+        viewer.setSource(
+            QUrl.fromLocalFile(get_resource_path("resource/model_preview.qml"))
+        )
+        if viewer.status() == QQuickWidget.Status.Error:
+            errors = "\n".join(error.toString() for error in viewer.errors())
+            raise RuntimeError(tr("模型预览初始化失败: {error}", error=errors))
+        root = viewer.rootObject()
+        if root is not None:
+            root.modelLoadFailed.connect(self.handle_model_load_failed)
+            QTimer.singleShot(0, root.reportCurrentModelError)
+        self.setCentralWidget(viewer)
 
-        target_pid = kernel32.GetCurrentProcessId()
-        icon_handle = load_windows_app_icon_handle()
-        if icon_handle:
-            WINDOW_ICON_HANDLES.append(icon_handle)
-
-        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-        hwnd_list: List[int] = []
-
-        def enum_windows_proc(hwnd, _lparam):
-            pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value != target_pid or not user32.IsWindowVisible(hwnd):
-                return True
-            hwnd_list.append(hwnd)
-            return True
-
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            hwnd_list.clear()
-            user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
-            if hwnd_list:
-                for hwnd in hwnd_list:
-                    # F3D/VTK can create an owned tool window, which Windows
-                    # minimizes onto the desktop instead of the taskbar.  Turn
-                    # it into a regular top-level application window.
-                    ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                    ex_style = (ex_style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-                    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
-                    user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0)
-                    if icon_handle:
-                        user32.SetClassLongPtrW(hwnd, GCLP_HICON, icon_handle)
-                        user32.SetClassLongPtrW(hwnd, GCLP_HICONSM, icon_handle)
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon_handle)
-                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon_handle)
-                    user32.SetWindowPos(
-                        hwnd,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-                    )
-            time.sleep(0.2)
-
-    threading.Thread(target=worker, daemon=True).start()
+    def handle_model_load_failed(self, error: str) -> None:
+        if self._load_failed:
+            return
+        self._load_failed = True
+        self._logger.error("GLB/GLTF loading failed: %s", error)
+        QMessageBox.critical(
+            self,
+            tr("模型预览失败"),
+            tr("模型加载失败，请查看日志。\n\n{error}", error=error),
+        )
+        QApplication.exit(2)
 
 
-def run_f3d_preview(model_path: str, cleanup_dir: str = "") -> int:
-    ensure_f3d_runtime_layout()
-    configure_f3d_dll_search_path()
+def run_model_preview(model_path: str, cleanup_dir: str = "") -> int:
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setWindowIcon(get_app_window_icon())
+    window = ModelPreviewWindow(model_path)
+    window.show()
     try:
-        import f3d
-    except ImportError:
-        print(tr("缺少依赖: f3d。请先执行 pip install f3d"), file=sys.stderr)
-        return 1
-
-    try:
-        engine = f3d.Engine.create()
-        window_width = 960
-        window_height = 720
-        engine.window.set_window_name(f"{APP_NAME} - {tr('模型预览')}")
-        try:
-            engine.window.size = (window_width, window_height)
-        except Exception:
-            pass
-        if sys.platform.startswith("win"):
-            try:
-                import ctypes
-
-                user32 = ctypes.windll.user32
-                screen_w = user32.GetSystemMetrics(0)
-                screen_h = user32.GetSystemMetrics(1)
-                pos_x = max(0, (screen_w - window_width) // 2)
-                pos_y = max(0, (screen_h - window_height) // 2)
-                engine.window.set_position(pos_x, pos_y)
-            except Exception:
-                pass
-        apply_windows_window_icon_later()
-        try:
-            engine.scene.add(model_path)
-        except RuntimeError as e:
-            raise RuntimeError(
-                tr("F3D 无法加载模型: {path}", path=model_path)
-            ) from e
-        try:
-            camera = engine.window.camera
-            camera.reset_to_bounds(0.9)
-            camera.azimuth(random.choice([35, 55, 125, 145, 215, 235, 305, 325]))
-            camera.elevation(random.choice([-25, -15, 15, 25, 35]))
-            camera.set_current_as_default()
-        except Exception:
-            pass
-        engine.interactor.start()
-        return 0
+        return app.exec()
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
-
-
-def check_f3d_runtime() -> int:
-    """Validate the packaged F3D binding without opening a render window."""
-    if is_bundled_app() and get_preview_runtime_args() != [sys.executable]:
-        print(
-            tr("F3D 自检失败: 打包程序的预览子进程启动参数不正确"),
-            file=sys.stderr,
-        )
-        return 1
-
-    ensure_f3d_runtime_layout()
-    configure_f3d_dll_search_path()
-    try:
-        import f3d
-    except Exception as e:
-        print(tr("F3D 自检失败: 无法导入 f3d: {error}", error=e), file=sys.stderr)
-        return 1
-
-    if not hasattr(f3d, "Engine"):
-        print(tr("F3D 自检失败: f3d.Engine 不存在"), file=sys.stderr)
-        return 1
-
-    print(
-        tr(
-            "F3D 自检通过: {version}",
-            version=getattr(f3d, "__version__", "unknown"),
-        )
-    )
-    return 0
 
 
 @dataclass
 class ModelPreviewProcess:
     process: subprocess.Popen
     temp_dir: str
+    log_path: str
 
 
 def ask_yes_no(
@@ -1259,7 +1105,7 @@ class MainWindow(QMainWindow):
 
     def open_preview(self, full_path: str) -> None:
         extension = get_path_extension(full_path)
-        if extension in SUPPORTED_F3D_MODEL_EXTENSIONS:
+        if extension in SUPPORTED_MODEL_EXTENSIONS:
             preview_type = "model"
         elif extension in SUPPORTED_IMAGE_EXTENSIONS:
             preview_type = "image"
@@ -1292,19 +1138,6 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        if preview_type == "model":
-            try:
-                import f3d  # noqa: F401
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    tr("模型预览失败"),
-                    tr(
-                        "F3D 运行环境不可用，请检查安装或打包内容。\n\n{error}",
-                        error=e,
-                    ),
-                )
-                return
         self.start_preview_load(preview_key, preview_type, base_url, full_path)
 
     def start_preview_load(
@@ -1364,10 +1197,14 @@ class MainWindow(QMainWindow):
                 )
                 temp_dir = ""
             elif preview_type == "model":
-                process = launch_f3d_preview_subprocess(local_path, temp_dir)
+                process, log_path = launch_model_preview_subprocess(
+                    local_path,
+                    temp_dir,
+                )
                 self._model_preview_processes[preview_key] = ModelPreviewProcess(
                     process=process,
                     temp_dir=temp_dir,
+                    log_path=log_path,
                 )
                 temp_dir = ""
             else:
@@ -1409,10 +1246,21 @@ class MainWindow(QMainWindow):
 
     def reap_model_preview_processes(self) -> None:
         for preview_key, record in list(self._model_preview_processes.items()):
-            if record.process.poll() is None:
+            return_code = record.process.poll()
+            if return_code is None:
                 continue
             self._model_preview_processes.pop(preview_key, None)
             shutil.rmtree(record.temp_dir, ignore_errors=True)
+            if return_code != 0 and not self._closing_after_task_cancel:
+                QMessageBox.critical(
+                    self,
+                    tr("模型预览失败"),
+                    tr(
+                        "模型预览进程异常退出（代码 {code}）。\n日志文件：{path}",
+                        code=return_code,
+                        path=record.log_path,
+                    ),
+                )
 
     def terminate_model_preview_processes(self) -> None:
         for record in list(self._model_preview_processes.values()):
@@ -1710,16 +1558,24 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    log_file = ""
+    if "--log-file" in sys.argv:
+        log_index = sys.argv.index("--log-file")
+        if log_index + 1 < len(sys.argv):
+            log_file = sys.argv[log_index + 1]
+    is_model_preview = len(sys.argv) >= 3 and sys.argv[1] == "--model-preview"
+    configure_logging(
+        "model-preview" if is_model_preview else "application",
+        log_file or None,
+    )
+    logging.getLogger(__name__).info("Startup arguments: %s", sys.argv[1:])
     set_language(load_config().language)
-    if len(sys.argv) >= 2 and sys.argv[1] == "--check-f3d-runtime":
-        return check_f3d_runtime()
-
-    if len(sys.argv) >= 3 and sys.argv[1] == "--f3d-preview":
+    if is_model_preview:
         model_path = sys.argv[2]
         cleanup_dir = ""
         if len(sys.argv) >= 5 and sys.argv[3] == "--cleanup-dir":
             cleanup_dir = sys.argv[4]
-        return run_f3d_preview(model_path, cleanup_dir)
+        return run_model_preview(model_path, cleanup_dir)
 
     app = QApplication(sys.argv)
     app.setWindowIcon(get_app_window_icon())

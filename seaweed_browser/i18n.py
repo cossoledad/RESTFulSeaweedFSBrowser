@@ -92,7 +92,10 @@ _EN: Dict[str, str] = {
     "预览任务较多": "Too Many Preview Tasks",
     "最多同时准备 {limit} 个预览，请等待当前任务完成或先取消其中一个。": "Up to {limit} previews can be prepared at once. Wait for a task to finish or cancel one first.",
     "模型预览失败": "Model Preview Failed",
-    "F3D 运行环境不可用，请检查安装或打包内容。\n\n{error}": "The F3D runtime is unavailable. Check the installation or packaged files.\n\n{error}",
+    "模型预览初始化失败: {error}": "Could not initialize model preview: {error}",
+    "中键拖动旋转 · Shift+中键平移 · 滚轮缩放 · 中键双击重置视角": "Middle-drag: orbit · Shift+middle-drag: pan · Wheel: zoom · Middle-double-click: reset view",
+    "模型加载失败，请查看日志。\n\n{error}": "Could not load the model. See the log.\n\n{error}",
+    "模型预览进程异常退出（代码 {code}）。\n日志文件：{path}": "The model preview process exited unexpectedly (code {code}).\nLog file: {path}",
     "文本": "Text",
     "图片": "Image",
     "模型": "Model",
@@ -191,12 +194,6 @@ _EN: Dict[str, str] = {
     "上传列表包含重复目标名称: {name}": "The upload list contains a duplicate target name: {name}",
     "max_workers 必须大于 0": "max_workers must be greater than 0",
     "max_entries 必须大于 0": "max_entries must be greater than 0",
-    "F3D 无法加载模型: {path}": "F3D could not load the model: {path}",
-    "缺少依赖: f3d。请先执行 pip install f3d": "Missing dependency: f3d. Run pip install f3d first.",
-    "F3D 自检失败: 打包程序的预览子进程启动参数不正确": "F3D check failed: invalid preview subprocess arguments in the packaged app",
-    "F3D 自检失败: 无法导入 f3d: {error}": "F3D check failed: could not import f3d: {error}",
-    "F3D 自检失败: f3d.Engine 不存在": "F3D check failed: f3d.Engine is missing",
-    "F3D 自检通过: {version}": "F3D check passed: {version}",
 }
 
 
@@ -283,7 +280,10 @@ _FR: Dict[str, str] = {
     "预览任务较多": "Trop d’aperçus en cours",
     "最多同时准备 {limit} 个预览，请等待当前任务完成或先取消其中一个。": "Au maximum {limit} aperçus peuvent être préparés. Attendez la fin d’une tâche ou annulez-en une.",
     "模型预览失败": "Échec de l’aperçu du modèle",
-    "F3D 运行环境不可用，请检查安装或打包内容。\n\n{error}": "L’environnement F3D est indisponible. Vérifiez l’installation ou les fichiers inclus.\n\n{error}",
+    "模型预览初始化失败: {error}": "Impossible d’initialiser l’aperçu du modèle : {error}",
+    "中键拖动旋转 · Shift+中键平移 · 滚轮缩放 · 中键双击重置视角": "Glisser avec le bouton central : orbite · Maj+glisser central : panoramique · Molette : zoom · Double-clic central : réinitialiser",
+    "模型加载失败，请查看日志。\n\n{error}": "Impossible de charger le modèle. Consultez le journal.\n\n{error}",
+    "模型预览进程异常退出（代码 {code}）。\n日志文件：{path}": "Le processus d’aperçu s’est arrêté anormalement (code {code}).\nJournal : {path}",
     "文本": "Texte",
     "图片": "Image",
     "模型": "Modèle",
@@ -382,12 +382,6 @@ _FR: Dict[str, str] = {
     "上传列表包含重复目标名称: {name}": "La liste contient un nom cible en double : {name}",
     "max_workers 必须大于 0": "max_workers doit être supérieur à 0",
     "max_entries 必须大于 0": "max_entries doit être supérieur à 0",
-    "F3D 无法加载模型: {path}": "F3D ne peut pas charger le modèle : {path}",
-    "缺少依赖: f3d。请先执行 pip install f3d": "Dépendance manquante : f3d. Exécutez d’abord pip install f3d.",
-    "F3D 自检失败: 打包程序的预览子进程启动参数不正确": "Échec du contrôle F3D : arguments du sous-processus d’aperçu incorrects",
-    "F3D 自检失败: 无法导入 f3d: {error}": "Échec du contrôle F3D : import de f3d impossible : {error}",
-    "F3D 自检失败: f3d.Engine 不存在": "Échec du contrôle F3D : f3d.Engine est absent",
-    "F3D 自检通过: {version}": "Contrôle F3D réussi : {version}",
 }
 
 

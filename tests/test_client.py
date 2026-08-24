@@ -75,6 +75,38 @@ class FakeHttpConnection:
 
 
 class ClientTests(unittest.TestCase):
+    def test_local_filesystem_backend_lists_previews_uploads_and_downloads(self) -> None:
+        client = SeaweedClient()
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as output:
+            base_url = "file:///" + root.replace("\\", "/").lstrip("/") + "/"
+            os.mkdir(os.path.join(root, "folder"))
+            source_file = os.path.join(root, "source.txt")
+            with open(source_file, "w", encoding="utf-8") as file:
+                file.write("local preview")
+
+            entries = client.list_dir(base_url, "/", 100)
+            by_path = {entry["FullPath"]: entry for entry in entries}
+            self.assertTrue(by_path["/folder"]["IsDirectory"])
+            self.assertEqual(by_path["/source.txt"]["FileSize"], len("local preview"))
+            self.assertEqual(client.preview_file(base_url, "/source.txt"), "local preview")
+
+            upload_source = os.path.join(output, "upload.txt")
+            with open(upload_source, "w", encoding="utf-8") as file:
+                file.write("uploaded")
+            client.upload_file(base_url, "/folder/upload.txt", upload_source)
+            self.assertEqual(
+                client.preview_file(base_url, "/folder/upload.txt"),
+                "uploaded",
+            )
+
+            target = os.path.join(output, "download.txt")
+            client.download_file_to_local(base_url, "/source.txt", target)
+            with open(target, "r", encoding="utf-8") as file:
+                self.assertEqual(file.read(), "local preview")
+
+            client.create_directory(base_url, "/created")
+            self.assertTrue(os.path.isdir(os.path.join(root, "created")))
+
     def test_create_directory_uses_empty_post_without_content_type(self) -> None:
         connection = FakeHttpConnection(FakeHttpResponse({"name": "新目录"}))
         with patch(

@@ -56,6 +56,7 @@ from seaweed_browser.core import (
     sanitize_positive_int,
     save_config,
     update_history,
+    update_location_history,
 )
 from seaweed_browser.i18n import (
     LANGUAGE_NAMES,
@@ -156,7 +157,7 @@ class ModelPreviewWindow(QMainWindow):
         )
         viewer.rootContext().setContextProperty(
             "modelControlsHint",
-            tr("中键拖动旋转 · Shift+中键平移 · 滚轮缩放 · 中键双击重置视角"),
+            tr("右键拖动旋转 · 中键拖动平移 · 滚轮缩放 · 右键双击重置视角"),
         )
         viewer.setSource(
             QUrl.fromLocalFile(get_resource_path("resource/model_preview.qml"))
@@ -305,7 +306,11 @@ class MainWindow(QMainWindow):
         base_edit = self.base_url_input.lineEdit()
         if base_edit is not None:
             base_edit.setPlaceholderText(tr("例如: http://10.1.23.81:38888"))
-        self.reload_combo_items(self.base_url_input, self.config.base_url_history, self.config.base_url)
+        self.reload_combo_items(
+            self.base_url_input,
+            self.location_base_urls(),
+            self.config.base_url,
+        )
         self.base_url_label = QLabel(tr("服务地址:"))
         top_row.addWidget(self.base_url_label)
         top_row.addWidget(self.base_url_input, 1)
@@ -320,7 +325,11 @@ class MainWindow(QMainWindow):
         root_edit = self.root_dir_input.lineEdit()
         if root_edit is not None:
             root_edit.setPlaceholderText(tr("例如: /buckets/cax-dev/PARTING/"))
-        self.reload_combo_items(self.root_dir_input, self.config.root_dir_history, self.config.root_dir)
+        self.reload_combo_items(
+            self.root_dir_input,
+            self.location_roots_for_base(self.config.base_url),
+            self.config.root_dir,
+        )
         self.load_root_btn = QPushButton(tr("加载根目录"))
         self.root_dir_label = QLabel(tr("根目录:"))
         dir_row.addWidget(self.root_dir_label)
@@ -405,6 +414,7 @@ class MainWindow(QMainWindow):
         self.create_dir_btn.clicked.connect(self.create_remote_directory)
         self.upload_files_btn.clicked.connect(self.select_files_to_upload)
         self.open_config_btn.clicked.connect(self.open_config_directory)
+        self.base_url_input.activated.connect(self.on_base_url_selected)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
 
@@ -517,13 +527,47 @@ class MainWindow(QMainWindow):
         self.config.page_limit = sanitize_positive_int(self.config.page_limit, PAGE_LIMIT)
         save_config(self.config)
 
+    def location_base_urls(self) -> List[str]:
+        result: List[str] = []
+        for entry in self.config.location_history:
+            base_url = str(entry.get("base_url", ""))
+            if base_url and base_url not in result:
+                result.append(base_url)
+        return result
+
+    def location_roots_for_base(self, base_url: str) -> List[str]:
+        normalized_base_url = normalize_base_url(base_url)
+        return [
+            str(entry["root_dir"])
+            for entry in self.config.location_history
+            if entry.get("base_url") == normalized_base_url
+        ]
+
+    def on_base_url_selected(self, _: int) -> None:
+        base_url = self.get_base_url()
+        roots = self.location_roots_for_base(base_url)
+        self.reload_combo_items(
+            self.root_dir_input,
+            roots,
+            roots[0] if roots else "/",
+        )
+
     def remember_input_histories(self, include_search: bool = False) -> None:
-        self.config.base_url_history = update_history(self.config.base_url_history, self.get_base_url())
-        self.config.root_dir_history = update_history(self.config.root_dir_history, self.get_root_dir())
+        base_url = self.get_base_url()
+        root_dir = self.get_root_dir()
+        self.config.location_history = update_location_history(
+            self.config.location_history,
+            base_url,
+            root_dir,
+        )
         if include_search:
             self.config.search_history = update_history(self.config.search_history, self.get_search_text())
-        self.reload_combo_items(self.base_url_input, self.config.base_url_history, self.get_base_url())
-        self.reload_combo_items(self.root_dir_input, self.config.root_dir_history, self.get_root_dir())
+        self.reload_combo_items(self.base_url_input, self.location_base_urls(), base_url)
+        self.reload_combo_items(
+            self.root_dir_input,
+            self.location_roots_for_base(base_url),
+            root_dir,
+        )
         if include_search:
             self.reload_combo_items(self.search_input, self.config.search_history, self.get_search_text())
         self.save_current_config()

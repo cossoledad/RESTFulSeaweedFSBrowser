@@ -17,7 +17,7 @@
   · Qt Quick 3D
 </p>
 
-当前版本：`1.0.14`
+当前版本：`1.1.1`
 
 ## 目录
 
@@ -76,10 +76,13 @@ python main.py
 
 ## 快速使用
 
-1. 输入 SeaweedFS Filer 的 `Base URL`，例如
+首次启动默认使用本机 Windows `C:` 盘：`Base URL` 为 `file:///C:/`，根目录为 `/`，
+无需运行 SeaweedFS 即可浏览、预览、创建目录、上传及下载文件。
+
+1. 保持默认本地地址，或输入 SeaweedFS Filer 的 `Base URL`，例如
    `http://10.1.23.81:38888`。
-2. 输入允许浏览的根目录，例如 `/buckets/cax-dev/files/`。
-3. 点击“加载根目录”。
+2. 输入允许浏览的根目录；本地模式使用 `/`，SeaweedFS 例如 `/buckets/cax-dev/files/`。
+3. 点击“加载根目录”。服务地址与根目录会作为一个历史记录项保存，切换地址时只显示该地址对应的根目录。
 4. 双击文件夹进入目录，双击文件打开对应预览。
 5. 使用“新建文件夹”“上传文件”或“保存到本地”执行写入和下载。
 6. 点击状态栏右侧的“任务”打开任务中心，查看进度、错误或取消任务。
@@ -335,8 +338,9 @@ sequenceDiagram
 - GLTF 的相对 `buffers` 和 `images` 会按原目录结构下载。
 - `data:` URI 和外部 URL 不重复下载。
 - 所有相对资源都经过本地路径边界校验，阻止 `../` 逃逸。
-- 模型窗口采用常见三维设计软件的相机操作：中键拖动旋转、`Shift+中键`
-  平移、滚轮缩放，中键双击恢复默认视角。
+- 模型窗口采用常见三维设计软件的相机操作：右键拖动旋转、中键拖动平移、
+  滚轮缩放，右键双击恢复默认视角；场景包含渐变背景、三点灯光、地面网格和随相机
+  旋转的世界坐标轴。左键暂未启用网格级点/线/面选择。
 - 主进程每秒回收已结束的模型预览进程；退出时统一终止剩余进程。
 
 普通输入框、确认框、文件选择器仍可使用短生命周期模态对话框，因为它们只收集一次
@@ -410,6 +414,7 @@ flowchart LR
 
 `SeaweedClient` 集中处理：
 
+- `file:///C:/` 等本地文件系统地址与 SeaweedFS HTTP 地址的统一访问。
 - URL 路径编码和 HTTP/HTTPS 连接。
 - SeaweedFS Filer 分页游标与最大分页次数保护。
 - `POST <path>/` 创建目录。
@@ -441,7 +446,7 @@ flowchart LR
 | `main.py` | 应用入口、主窗口、用例编排、结果路由、模型预览子进程入口 |
 | `seaweed_browser/core.py` | 版本、配置、路径校验、URL、格式化规则 |
 | `seaweed_browser/i18n.py` | 语言状态、中文回退、英文和法文翻译目录 |
-| `seaweed_browser/client.py` | SeaweedFS HTTP、分页、流式上传和原子下载 |
+| `seaweed_browser/client.py` | 本地文件系统 / SeaweedFS HTTP、分页、流式上传和原子下载 |
 | `seaweed_browser/task_models.py` | 任务类型、状态、进度、错误和快照 |
 | `seaweed_browser/task_runtime.py` | `QThread` 生命周期、取消、去重、并发限制和历史 |
 | `seaweed_browser/tasks.py` | 目录、上传、下载和预览 Worker |
@@ -621,8 +626,11 @@ Windows 默认配置位置：
 ```json
 {
   "language": "zh_CN",
-  "base_url": "http://10.1.23.81:38888",
-  "root_dir": "/buckets/cax-dev/files/",
+  "base_url": "file:///C:/",
+  "root_dir": "/",
+  "location_history": [
+    {"base_url": "file:///C:/", "root_dir": "/"}
+  ],
   "page_limit": 1000,
   "directory_cache_max_entries": 32,
   "directory_download_workers": 4,

@@ -4,7 +4,9 @@ import http.client
 import json
 import mimetypes
 import os
+import shutil
 import ssl
+import stat
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +20,7 @@ from .core import (
     PREVIEW_MAX_BYTES,
     basename,
     join_url,
+    normalize_dir_path,
     sanitize_positive_int,
 )
 from .i18n import tr
@@ -45,6 +48,48 @@ class SeaweedHttpError(RuntimeError):
 def ensure_not_cancelled(cancel_check: CancelCheck) -> None:
     if cancel_check is not None and cancel_check():
         raise OperationCancelled(tr("操作已取消"))
+
+
+def is_local_filesystem_url(base_url: str) -> bool:
+    return urllib.parse.urlsplit(base_url.strip()).scheme.lower() == "file"
+
+
+def local_filesystem_path(base_url: str, remote_path: str) -> str:
+    """Map a virtual POSIX path under a file URL to a contained local path."""
+    parsed = urllib.parse.urlsplit(base_url.strip())
+    if parsed.scheme.lower() != "file" or parsed.netloc not in {"", "localhost"}:
+        raise ValueError(tr("不支持的本地文件系统地址: {url}", url=base_url))
+    base_path = urllib.request.url2pathname(urllib.parse.unquote(parsed.path))
+    if os.name == "nt":
+        base_path = base_path.lstrip("/")
+        if len(base_path) == 2 and base_path[1] == ":":
+            base_path += os.sep
+    root = os.path.realpath(os.path.abspath(base_path))
+    relative = normalize_dir_path(remote_path).lstrip("/")
+    target = os.path.realpath(os.path.join(root, *relative.split("/"))) if relative else root
+    try:
+        if os.path.commonpath([root, target]) != root:
+            raise ValueError(tr("路径越界: {path}", path=remote_path))
+    except ValueError as error:
+        raise ValueError(tr("路径越界: {path}", path=remote_path)) from error
+    return target
+
+
+def local_entry(dir_path: str, item: os.DirEntry[str]) -> Dict[str, Any]:
+    metadata = item.stat(follow_symlinks=False)
+    full_path = normalize_dir_path(dir_path).rstrip("/") + "/" + item.name
+    if not full_path.startswith("/"):
+        full_path = "/" + full_path
+    is_dir = stat.S_ISDIR(metadata.st_mode)
+    return {
+        "FullPath": full_path,
+        "Mode": metadata.st_mode,
+        "FileSize": 0 if is_dir else metadata.st_size,
+        "Mtime": int(metadata.st_mtime),
+        "Crtime": int(metadata.st_ctime),
+        "Mime": "inode/directory" if is_dir else (mimetypes.guess_type(item.name)[0] or ""),
+        "IsDirectory": is_dir,
+    }
 
 
 def http_get_json(
@@ -143,6 +188,11 @@ class SeaweedClient:
         cancel_check: CancelCheck = None,
     ) -> Dict[str, Any]:
         ensure_not_cancelled(cancel_check)
+        if is_local_filesystem_url(base_url):
+            target = local_filesystem_path(base_url, full_path)
+            os.mkdir(target)
+            ensure_not_cancelled(cancel_check)
+            return {"FullPath": normalize_dir_path(full_path), "name": basename(full_path)}
         url = join_url(base_url, full_path).rstrip("/") + "/"
         connection, request_target = open_http_connection(url, timeout=30)
         try:
@@ -172,6 +222,33 @@ class SeaweedClient:
         if not os.path.isfile(local_file_path):
             raise ValueError(tr("不是普通文件: {path}", path=local_file_path))
         total = stat_before.st_size
+        if is_local_filesystem_url(base_url):
+            target = local_filesystem_path(base_url, full_path)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            temp_path = f"{target}.part-{uuid.uuid4().hex}"
+            copied = 0
+            try:
+                with open(local_file_path, "rb") as source, open(temp_path, "wb") as destination:
+                    while True:
+                        ensure_not_cancelled(cancel_check)
+                        chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        copied += len(chunk)
+                        if on_progress is not None:
+                            on_progress(copied, total)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                ensure_not_cancelled(cancel_check)
+                os.replace(temp_path, target)
+            except Exception:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                raise
+            return {"uploaded_bytes": copied, "verified": False}
         url = join_url(base_url, full_path)
         connection, request_target = open_http_connection(url, timeout=60)
         digest = hashlib.md5()
@@ -225,6 +302,16 @@ class SeaweedClient:
         on_progress: Optional[Callable[[int], None]] = None,
         cancel_check: CancelCheck = None,
     ) -> List[Dict[str, Any]]:
+        if is_local_filesystem_url(base_url):
+            target = local_filesystem_path(base_url, dir_path)
+            entries: List[Dict[str, Any]] = []
+            with os.scandir(target) as children:
+                for child in children:
+                    ensure_not_cancelled(cancel_check)
+                    entries.append(local_entry(dir_path, child))
+                    if on_progress is not None:
+                        on_progress(len(entries))
+            return entries
         url = join_url(base_url, dir_path)
         all_entries: List[Dict[str, Any]] = []
         last_file_name = ""
@@ -271,6 +358,19 @@ class SeaweedClient:
         full_path: str,
         cancel_check: CancelCheck = None,
     ) -> str:
+        if is_local_filesystem_url(base_url):
+            target = local_filesystem_path(base_url, full_path)
+            chunks: List[bytes] = []
+            remaining = PREVIEW_MAX_BYTES
+            with open(target, "rb") as source:
+                while remaining > 0:
+                    ensure_not_cancelled(cancel_check)
+                    chunk = source.read(min(DOWNLOAD_CHUNK_SIZE, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+            return b"".join(chunks).decode("utf-8", errors="replace")
         data = http_get_bytes(join_url(base_url, full_path), cancel_check=cancel_check)
         return data.decode("utf-8", errors="replace")
 
@@ -283,6 +383,38 @@ class SeaweedClient:
         on_progress: ProgressCallback = None,
         atomic: bool = True,
     ) -> None:
+        if is_local_filesystem_url(base_url):
+            source_path = local_filesystem_path(base_url, full_path)
+            parent_dir = os.path.dirname(local_file_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            temp_path = f"{local_file_path}.part-{uuid.uuid4().hex}" if atomic else local_file_path
+            copied = 0
+            total = os.path.getsize(source_path)
+            try:
+                with open(source_path, "rb") as source, open(temp_path, "wb") as destination:
+                    while True:
+                        ensure_not_cancelled(cancel_check)
+                        chunk = source.read(DOWNLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        destination.write(chunk)
+                        copied += len(chunk)
+                        if on_progress is not None:
+                            on_progress(copied, total)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+                ensure_not_cancelled(cancel_check)
+                if atomic:
+                    os.replace(temp_path, local_file_path)
+            except Exception:
+                if atomic:
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                raise
+            return
         url = join_url(base_url, full_path)
         req = urllib.request.Request(url, method="GET")
         parent_dir = os.path.dirname(local_file_path)

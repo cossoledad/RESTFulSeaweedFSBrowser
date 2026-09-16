@@ -11,7 +11,7 @@ from .i18n import DEFAULT_LANGUAGE, normalize_language, tr
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 DEFAULT_BASE_URL = "file:///C:/"
 DEFAULT_ROOT_DIR = "/"
 PAGE_LIMIT = 1000

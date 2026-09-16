@@ -113,6 +113,48 @@ class ConcurrentUploadTests(unittest.TestCase):
         self.assertTrue(all(item.from_directory for item in items))
         self.assertEqual({item.top_level_name for item in items}, {"project"})
 
+    def test_build_items_accepts_files_and_folders_in_one_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "project")
+            os.makedirs(folder)
+            nested_file = os.path.join(folder, "inside.txt")
+            loose_file = os.path.join(root, "loose.txt")
+            with open(nested_file, "wb") as file:
+                file.write(b"inside")
+            with open(loose_file, "wb") as file:
+                file.write(b"loose")
+
+            items = build_upload_items(
+                [folder, loose_file],
+                "/target",
+                join_remote_child,
+            )
+
+        self.assertEqual(
+            [item.remote_path for item in items],
+            ["/target/project/inside.txt", "/target/loose.txt"],
+        )
+        self.assertEqual([item.from_directory for item in items], [True, False])
+
+    def test_build_items_rejects_file_folder_top_level_type_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            first = os.path.join(root, "first")
+            second = os.path.join(root, "second")
+            os.makedirs(os.path.join(first, "same"))
+            os.makedirs(second)
+            with open(os.path.join(first, "same", "inside.txt"), "wb") as file:
+                file.write(b"inside")
+            conflicting_file = os.path.join(second, "same")
+            with open(conflicting_file, "wb") as file:
+                file.write(b"file")
+
+            with self.assertRaises(ValueError):
+                build_upload_items(
+                    [os.path.join(first, "same"), conflicting_file],
+                    "/target",
+                    join_remote_child,
+                )
+
     def test_build_items_rejects_empty_folder(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             folder = os.path.join(root, "empty")

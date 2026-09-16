@@ -1,14 +1,20 @@
-from typing import Callable, Optional
+import os
+from typing import Callable, List, Optional
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QDir, QModelIndex, QPoint, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QFileSystemModel,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
+    QPushButton,
     QScrollArea,
+    QTreeView,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -28,6 +34,135 @@ def configure_preview_window(dialog: QDialog) -> None:
     # the taskbar, so detach it while MainWindow retains the Python reference.
     dialog.setParent(None, flags)
     dialog.setWindowIcon(get_app_window_icon())
+
+
+class MixedPathSelectionDialog(QDialog):
+    """Select any mixture of existing files and folders in one dialog."""
+
+    def __init__(
+        self,
+        title: str,
+        start_directory: str = "",
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowIcon(get_app_window_icon())
+        self.resize(920, 620)
+        self._selected_paths: List[str] = []
+
+        initial_directory = os.path.abspath(
+            start_directory if os.path.isdir(start_directory) else QDir.homePath()
+        )
+
+        self.path_input = QLineEdit(self)
+        self.path_input.setText(QDir.toNativeSeparators(initial_directory))
+        self.path_input.returnPressed.connect(self.navigate_from_input)
+        self.up_button = QPushButton(tr("上一级"), self)
+        self.up_button.clicked.connect(self.navigate_up)
+        self.computer_button = QPushButton(tr("此电脑"), self)
+        self.computer_button.clicked.connect(self.show_computer)
+
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.up_button)
+        path_row.addWidget(self.computer_button)
+        path_row.addWidget(self.path_input, 1)
+
+        self.model = QFileSystemModel(self)
+        self.model.setFilter(
+            QDir.Filter.AllEntries
+            | QDir.Filter.NoDotAndDotDot
+            | QDir.Filter.AllDirs
+            | QDir.Filter.Drives
+        )
+        self.model.setRootPath(initial_directory)
+
+        self.tree = QTreeView(self)
+        self.tree.setModel(self.model)
+        self.tree.setRootIndex(self.model.index(initial_directory))
+        self.tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
+        self.tree.setSelectionBehavior(QTreeView.SelectionBehavior.SelectRows)
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.tree.setColumnWidth(0, 420)
+        self.tree.doubleClicked.connect(self.handle_double_click)
+
+        help_label = QLabel(
+            tr("单击选择，双击文件夹进入；按 Ctrl 或 Shift 可同时选择多个文件和文件夹。"),
+            self,
+        )
+        help_label.setWordWrap(True)
+
+        buttons = QDialogButtonBox(self)
+        self.select_button = buttons.addButton(
+            tr("选择"),
+            QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        cancel_button = buttons.addButton(
+            tr("取消"),
+            QDialogButtonBox.ButtonRole.RejectRole,
+        )
+        self.select_button.clicked.connect(self.accept_selection)
+        cancel_button.clicked.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(path_row)
+        layout.addWidget(self.tree, 1)
+        layout.addWidget(help_label)
+        layout.addWidget(buttons)
+
+    def set_directory(self, directory: str) -> None:
+        normalized = os.path.abspath(directory)
+        if not os.path.isdir(normalized):
+            return
+        self.model.setRootPath(normalized)
+        self.tree.setRootIndex(self.model.index(normalized))
+        self.path_input.setText(QDir.toNativeSeparators(normalized))
+
+    def navigate_from_input(self) -> None:
+        path = QDir.fromNativeSeparators(self.path_input.text().strip())
+        if path:
+            self.set_directory(path)
+        else:
+            self.show_computer()
+
+    def navigate_up(self) -> None:
+        current = QDir.fromNativeSeparators(self.path_input.text().strip())
+        if not current:
+            return
+        parent = os.path.dirname(os.path.abspath(current))
+        if os.path.normcase(parent) == os.path.normcase(os.path.abspath(current)):
+            self.show_computer()
+        else:
+            self.set_directory(parent)
+
+    def show_computer(self) -> None:
+        self.model.setRootPath("")
+        self.tree.setRootIndex(QModelIndex())
+        self.path_input.clear()
+
+    def handle_double_click(self, index: QModelIndex) -> None:
+        path = self.model.filePath(index)
+        if os.path.isdir(path):
+            self.set_directory(path)
+
+    def accept_selection(self) -> None:
+        rows = self.tree.selectionModel().selectedRows(0)
+        paths: List[str] = []
+        seen = set()
+        for index in rows:
+            path = os.path.abspath(self.model.filePath(index))
+            if path in seen or not os.path.exists(path):
+                continue
+            seen.add(path)
+            paths.append(path)
+        if not paths:
+            return
+        self._selected_paths = paths
+        self.accept()
+
+    def selected_paths(self) -> List[str]:
+        return list(self._selected_paths)
 
 
 class SortableTreeWidgetItem(QTreeWidgetItem):

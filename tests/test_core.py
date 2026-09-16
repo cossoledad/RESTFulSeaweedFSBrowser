@@ -12,6 +12,7 @@ from seaweed_browser.core import (
     join_url,
     join_remote_child,
     load_config,
+    parent_dir_path,
     remote_path_is_within_root,
     safe_local_path,
     sanitize_bounded_int,
@@ -22,6 +23,12 @@ from seaweed_browser.core import (
 
 
 class CoreTests(unittest.TestCase):
+    def test_parent_dir_path_can_move_above_a_configured_root(self) -> None:
+        self.assertEqual(parent_dir_path("/bucket/root/child/"), "/bucket/root")
+        self.assertEqual(parent_dir_path("/bucket/root"), "/bucket")
+        self.assertEqual(parent_dir_path("/bucket"), "/")
+        self.assertEqual(parent_dir_path("/"), "/")
+
     def test_join_url_encodes_remote_path(self) -> None:
         self.assertEqual(
             join_url("http://localhost:8888/", "/bucket/中文 文件#1?.txt"),

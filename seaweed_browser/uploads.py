@@ -43,10 +43,17 @@ def build_upload_items(
 ) -> List[UploadItem]:
     items: List[UploadItem] = []
     seen_targets = set()
+    top_level_kinds: Dict[str, bool] = {}
     for local_path in local_paths:
         absolute_path = os.path.abspath(local_path)
         if os.path.isdir(absolute_path):
             root_name = os.path.basename(os.path.normpath(absolute_path))
+            previous_kind = top_level_kinds.get(root_name)
+            if previous_kind is not None and not previous_kind:
+                raise ValueError(
+                    tr("上传列表包含重复目标名称: {name}", name=root_name)
+                )
+            top_level_kinds[root_name] = True
             candidates = []
             for current_root, directory_names, file_names in os.walk(
                 absolute_path,
@@ -86,6 +93,11 @@ def build_upload_items(
         if not os.path.isfile(absolute_path):
             raise ValueError(tr("不是普通文件: {path}", path=local_path))
         file_name = os.path.basename(absolute_path)
+        if file_name in top_level_kinds:
+            raise ValueError(
+                tr("上传列表包含重复目标名称: {name}", name=file_name)
+            )
+        top_level_kinds[file_name] = False
         remote_path = join_child(remote_directory, file_name)
         if remote_path in seen_targets:
             raise ValueError(

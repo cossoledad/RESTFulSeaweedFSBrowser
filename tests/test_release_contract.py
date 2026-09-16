@@ -45,6 +45,14 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("tonemapMode: SceneEnvironment.TonemapModeFilmic", qml_source)
         self.assertIn("onWheel: function(wheel)", qml_source)
         self.assertIn("onDoubleClicked: function(mouse)", qml_source)
+        self.assertIn("Quaternion.fromAxesAndAngles", qml_source)
+        self.assertIn("inverseRotation(cameraOrigin.rotation)", qml_source)
+        self.assertNotIn(
+            "eulerRotation: Qt.vector3d(-cameraOrigin.pitch, -cameraOrigin.yaw, 0)",
+            qml_source,
+        )
+        self.assertIn('"label": "TOP"', qml_source)
+        self.assertIn("id: majorGrid", qml_source)
         self.assertNotIn("OrbitCameraController", qml_source)
         self.assertNotIn('root.property("modelStatus")', main_source)
         self.assertNotIn("import f3d", main_source)

@@ -234,6 +234,15 @@ def normalize_dir_path(path: str) -> str:
     return cleaned
 
 
+def parent_dir_path(path: str) -> str:
+    """Return the normalized parent of a remote path, stopping only at ``/``."""
+    normalized = normalize_dir_path(path).rstrip("/")
+    if not normalized:
+        return "/"
+    parent = normalized.rsplit("/", 1)[0]
+    return parent or "/"
+
+
 def join_url(base_url: str, full_path: str) -> str:
     normalized_path = normalize_dir_path(full_path)
     encoded_path = urllib.parse.quote(

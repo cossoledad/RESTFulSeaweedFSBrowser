@@ -50,6 +50,7 @@ from seaweed_browser.core import (
     load_config,
     normalize_base_url,
     normalize_dir_path,
+    parent_dir_path,
     parse_mode_value,
     parse_time_sort_value,
     remote_path_is_within_root,
@@ -87,6 +88,7 @@ from seaweed_browser.resources import (
 from seaweed_browser.widgets import (
     EntryDetailDialog,
     ImagePreviewDialog,
+    MixedPathSelectionDialog,
     PreviewDialog,
     SortableTreeWidgetItem,
 )
@@ -273,6 +275,7 @@ class MainWindow(QMainWindow):
         self._create_directory_context: Optional[tuple[str, str]] = None
         self._upload_task_id: Optional[str] = None
         self._upload_context: Optional[tuple[str, str]] = None
+        self._last_upload_directory = ""
         self._task_manager = TaskManager(
             self,
             history_limit=50,
@@ -362,11 +365,7 @@ class MainWindow(QMainWindow):
         self.refresh_btn = QPushButton(tr("刷新当前目录 (F5)"))
         self.save_dir_btn = QPushButton(tr("保存到本地"))
         self.create_dir_btn = QPushButton(tr("新建文件夹"))
-        self.upload_files_btn = QPushButton(tr("上传"))
-        self.upload_menu = QMenu(self.upload_files_btn)
-        self.upload_files_action = self.upload_menu.addAction(tr("上传文件"))
-        self.upload_folder_action = self.upload_menu.addAction(tr("上传文件夹"))
-        self.upload_files_btn.setMenu(self.upload_menu)
+        self.upload_files_btn = QPushButton(tr("上传文件或文件夹"))
         browser_toolbar.addWidget(self.up_btn)
         browser_toolbar.addWidget(self.refresh_btn)
         browser_toolbar.addWidget(self.save_dir_btn)
@@ -418,10 +417,11 @@ class MainWindow(QMainWindow):
         self.up_btn.clicked.connect(self.go_up_directory)
         self.save_dir_btn.clicked.connect(self.save_current_directory_to_local)
         self.create_dir_btn.clicked.connect(self.create_remote_directory)
-        self.upload_files_action.triggered.connect(self.select_files_to_upload)
-        self.upload_folder_action.triggered.connect(self.select_folder_to_upload)
+        self.upload_files_btn.clicked.connect(self.select_paths_to_upload)
         self.open_config_btn.clicked.connect(self.open_config_directory)
         self.base_url_input.activated.connect(self.on_base_url_selected)
+        if base_edit is not None:
+            base_edit.textEdited.connect(self.on_base_url_edited)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
 
@@ -485,9 +485,7 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setText(tr("刷新当前目录 (F5)"))
         self.save_dir_btn.setText(tr("保存到本地"))
         self.create_dir_btn.setText(tr("新建文件夹"))
-        self.upload_files_btn.setText(tr("上传"))
-        self.upload_files_action.setText(tr("上传文件"))
-        self.upload_folder_action.setText(tr("上传文件夹"))
+        self.upload_files_btn.setText(tr("上传文件或文件夹"))
         self.tree.setHeaderLabels(
             [
                 tr("名称"),
@@ -555,13 +553,23 @@ class MainWindow(QMainWindow):
     def on_base_url_selected(self, _: int) -> None:
         base_url = self.get_base_url()
         roots = self.location_roots_for_base(base_url)
+        current_root = self.root_dir_input.currentText() or self.current_dir
         self.reload_combo_items(
             self.root_dir_input,
             roots,
-            roots[0] if roots else "/",
+            roots[0] if roots else current_root,
         )
 
-    def remember_input_histories(self, include_search: bool = False) -> None:
+    def on_base_url_edited(self, _: str) -> None:
+        """Detach an edited address from saved roots until it is explicitly loaded."""
+        current_root = self.root_dir_input.currentText() or self.current_dir
+        self.reload_combo_items(
+            self.root_dir_input,
+            [current_root],
+            current_root,
+        )
+
+    def remember_location_history(self) -> None:
         base_url = self.get_base_url()
         root_dir = self.get_root_dir()
         self.config.location_history = update_location_history(
@@ -569,16 +577,25 @@ class MainWindow(QMainWindow):
             base_url,
             root_dir,
         )
-        if include_search:
-            self.config.search_history = update_history(self.config.search_history, self.get_search_text())
         self.reload_combo_items(self.base_url_input, self.location_base_urls(), base_url)
         self.reload_combo_items(
             self.root_dir_input,
             self.location_roots_for_base(base_url),
             root_dir,
         )
-        if include_search:
-            self.reload_combo_items(self.search_input, self.config.search_history, self.get_search_text())
+        self.save_current_config()
+
+    def remember_search_history(self) -> None:
+        search_text = self.get_search_text()
+        self.config.search_history = update_history(
+            self.config.search_history,
+            search_text,
+        )
+        self.reload_combo_items(
+            self.search_input,
+            self.config.search_history,
+            search_text,
+        )
         self.save_current_config()
 
     @staticmethod
@@ -602,7 +619,7 @@ class MainWindow(QMainWindow):
             )
 
     def load_root_directory(self) -> None:
-        self.remember_input_histories(include_search=False)
+        self.remember_location_history()
         self.load_directory(self.get_root_dir(), force_reload=False)
 
     def refresh_current_directory(self) -> None:
@@ -638,7 +655,6 @@ class MainWindow(QMainWindow):
             self._status_controller.show_transient(tr("正在加载，请稍候..."))
             return
         self.current_dir = normalize_dir_path(dir_path)
-        self.remember_input_histories(include_search=False)
         self.path_label.setText(tr("当前位置: {path}", path=self.current_dir))
         if not force_reload and self.try_apply_cached_directory(base_url, self.current_dir):
             return
@@ -759,7 +775,7 @@ class MainWindow(QMainWindow):
         self.tree.sortItems(sort_column, sort_order)
 
     def apply_search(self) -> None:
-        self.remember_input_histories(include_search=True)
+        self.remember_search_history()
         text = self.get_search_text().lower()
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
@@ -780,8 +796,7 @@ class MainWindow(QMainWindow):
         item = self.tree.itemAt(pos)
         menu = QMenu(self)
         create_action = menu.addAction(tr("新建文件夹"))
-        upload_files_action = menu.addAction(tr("上传文件"))
-        upload_folder_action = menu.addAction(tr("上传文件夹"))
+        upload_action = menu.addAction(tr("上传文件或文件夹"))
         details_action = None
         if item is not None:
             menu.addSeparator()
@@ -789,10 +804,8 @@ class MainWindow(QMainWindow):
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action == create_action:
             self.create_remote_directory()
-        elif action == upload_files_action:
-            self.select_files_to_upload()
-        elif action == upload_folder_action:
-            self.select_folder_to_upload()
+        elif action == upload_action:
+            self.select_paths_to_upload()
         elif details_action is not None and action == details_action:
             self.open_entry_details(item)
 
@@ -908,31 +921,26 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("创建文件夹失败"), error.message)
             self._status_controller.show_transient(tr("目录创建失败"))
 
-    def select_files_to_upload(self) -> None:
+    def select_paths_to_upload(self) -> None:
         upload_context = self.get_upload_context()
         if upload_context is None:
             return
         base_url, target_dir = upload_context
-        local_paths, _ = QFileDialog.getOpenFileNames(
+        dialog = MixedPathSelectionDialog(
+            tr("选择要上传的文件和文件夹"),
+            self._last_upload_directory,
             self,
-            tr("选择要上传的文件"),
-            "",
-            tr("所有文件 (*)"),
         )
-        if local_paths:
-            self.prepare_upload_batch(local_paths, base_url, target_dir)
-
-    def select_folder_to_upload(self) -> None:
-        upload_context = self.get_upload_context()
-        if upload_context is None:
+        if not dialog.exec():
             return
-        base_url, target_dir = upload_context
-        local_path = QFileDialog.getExistingDirectory(
-            self,
-            tr("选择要上传的文件夹"),
+        local_paths = dialog.selected_paths()
+        if not local_paths:
+            return
+        first_path = local_paths[0]
+        self._last_upload_directory = (
+            first_path if os.path.isdir(first_path) else os.path.dirname(first_path)
         )
-        if local_path:
-            self.prepare_upload_batch([local_path], base_url, target_dir)
+        self.prepare_upload_batch(local_paths, base_url, target_dir)
 
     def get_upload_context(self) -> Optional[tuple[str, str]]:
         if self.is_task_active(self._upload_task_id):
@@ -1194,18 +1202,19 @@ class MainWindow(QMainWindow):
         window.show()
 
     def go_up_directory(self) -> None:
-        root_dir = self.get_root_dir().rstrip("/")
-        current = self.current_dir.rstrip("/")
-        if current == root_dir:
-            return
-        parts = [p for p in current.split("/") if p]
-        if not parts:
-            self.current_dir = self.get_root_dir()
+        root_dir = self.get_root_dir()
+        current = normalize_dir_path(self.current_dir)
+        if current.rstrip("/") == root_dir.rstrip("/"):
+            self.current_dir = parent_dir_path(current)
+            self.root_dir_input.setCurrentText(self.current_dir)
+            self.save_current_config()
         else:
-            parts = parts[:-1]
-            self.current_dir = "/" + "/".join(parts) if parts else "/"
-        if not self.current_dir.startswith(root_dir):
-            self.current_dir = self.get_root_dir()
+            parent = parent_dir_path(current)
+            self.current_dir = (
+                parent
+                if remote_path_is_within_root(parent, root_dir)
+                else root_dir
+            )
         self.load_directory(self.current_dir, force_reload=False)
 
     def open_preview(self, full_path: str) -> None:

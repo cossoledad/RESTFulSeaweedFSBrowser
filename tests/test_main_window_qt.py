@@ -163,10 +163,15 @@ class MainWindowBehaviorQtTests(unittest.TestCase):
             dialog.tree.selectionModel().select(dialog.model.index(folder), flags)
             dialog.tree.selectionModel().select(dialog.model.index(file_path), flags)
             dialog.accept_selection()
-            self.assertEqual(
-                {os.path.normcase(path) for path in dialog.selected_paths()},
-                {os.path.normcase(folder), os.path.normcase(file_path)},
-            )
+            selected_paths = dialog.selected_paths()
+            self.assertEqual(len(selected_paths), 2)
+            for expected_path in (folder, file_path):
+                self.assertTrue(
+                    any(
+                        os.path.samefile(selected_path, expected_path)
+                        for selected_path in selected_paths
+                    )
+                )
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
+import os
 import time
 import unittest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 try:
-    from PySide6.QtCore import QCoreApplication, QTimer
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
 
     from seaweed_browser.task_models import (
         TaskError,
@@ -27,7 +31,7 @@ class TaskManagerQtTests(unittest.TestCase):
                     time.sleep(0.005)
                 self.cancelled.emit()
 
-        app = QCoreApplication.instance() or QCoreApplication([])
+        app = QApplication.instance() or QApplication([])
         manager = TaskManager()
         worker = BusyWorker()
         completed = []
@@ -55,7 +59,7 @@ class TaskManagerQtTests(unittest.TestCase):
             def run(self) -> None:
                 self.succeeded.emit({"large_business_result": [1, 2, 3]})
 
-        app = QCoreApplication.instance() or QCoreApplication([])
+        app = QApplication.instance() or QApplication([])
         manager = TaskManager(history_limit=1)
         finished = []
         results = []
@@ -91,7 +95,7 @@ class TaskManagerQtTests(unittest.TestCase):
                     )
                 )
 
-        app = QCoreApplication.instance() or QCoreApplication([])
+        app = QApplication.instance() or QApplication([])
         manager = TaskManager()
         failures = []
         manager.task_failed.connect(

@@ -27,10 +27,11 @@ class I18nTests(unittest.TestCase):
         set_language(DEFAULT_LANGUAGE)
 
     def test_supported_languages_and_locale_normalization(self) -> None:
-        self.assertEqual(set(LANGUAGE_NAMES), {"zh_CN", "en", "fr"})
+        self.assertEqual(set(LANGUAGE_NAMES), {"zh_CN", "en", "fr", "ru"})
         self.assertEqual(normalize_language("zh-CN"), "zh_CN")
         self.assertEqual(normalize_language("en_US"), "en")
         self.assertEqual(normalize_language("fr-FR"), "fr")
+        self.assertEqual(normalize_language("ru-RU"), "ru")
         self.assertEqual(normalize_language("de_DE"), DEFAULT_LANGUAGE)
 
     def test_translation_and_chinese_fallback(self) -> None:
@@ -48,8 +49,8 @@ class I18nTests(unittest.TestCase):
     def test_catalogs_have_identical_keys_and_placeholders(self) -> None:
         translation_catalogs = catalogs()
         english_keys = set(translation_catalogs["en"])
-        french_keys = set(translation_catalogs["fr"])
-        self.assertEqual(english_keys, french_keys)
+        for catalog in translation_catalogs.values():
+            self.assertEqual(english_keys, set(catalog))
         for source in sorted(english_keys):
             expected = placeholder_names(source)
             with self.subTest(source=source, language="en"):
@@ -60,6 +61,11 @@ class I18nTests(unittest.TestCase):
             with self.subTest(source=source, language="fr"):
                 self.assertEqual(
                     placeholder_names(translation_catalogs["fr"][source]),
+                    expected,
+                )
+            with self.subTest(source=source, language="ru"):
+                self.assertEqual(
+                    placeholder_names(translation_catalogs["ru"][source]),
                     expected,
                 )
 

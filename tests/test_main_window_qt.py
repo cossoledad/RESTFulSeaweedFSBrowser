@@ -10,7 +10,7 @@ try:
     from PySide6.QtWidgets import QApplication, QAbstractItemView
 
     from main import MainWindow
-    from seaweed_browser.core import AppConfig
+    from seaweed_browser.core import AppConfig, normalize_dir_path
     from seaweed_browser.widgets import MixedPathSelectionDialog
 
     HAS_QT = True
@@ -26,8 +26,13 @@ class MainWindowBehaviorQtTests(unittest.TestCase):
 
     def make_window(self) -> MainWindow:
         class HarnessMainWindow(MainWindow):
-            def load_directory(self, dir_path: str, force_reload: bool) -> None:
+            def load_directory(self, dir_path: str, force_reload: bool) -> bool:
                 self.last_requested_directory = (dir_path, force_reload)
+                self._directory_load_context = (
+                    self.get_base_url(),
+                    normalize_dir_path(dir_path),
+                )
+                return True
 
         config = AppConfig(
             base_url="http://old.example",
@@ -53,9 +58,14 @@ class MainWindowBehaviorQtTests(unittest.TestCase):
 
         window.on_base_url_edited("http://new.example")
 
-        self.assertEqual(window.root_dir_input.count(), 1)
+        self.assertEqual(window.root_dir_input.count(), 0)
         self.assertEqual(window.root_dir_input.currentText(), "/visible/root")
         self.assertEqual(window.config.location_history, original_history)
+
+        root_edit = window.root_dir_input.lineEdit()
+        self.assertIsNotNone(root_edit)
+        root_edit.setText("/edited/root")
+        self.assertEqual(window.get_root_dir(), "/edited/root")
 
         with (
             patch.object(window, "start_directory_load"),
@@ -71,10 +81,29 @@ class MainWindowBehaviorQtTests(unittest.TestCase):
         window.root_dir_input.setCurrentText("/visible/root")
         with patch("main.save_config"):
             window.load_root_directory()
+            self.assertEqual(window.config.location_history, original_history)
+            self.assertEqual(
+                window.last_requested_directory,
+                ("/visible/root", True),
+            )
+            window.on_directory_load_finished([])
         self.assertEqual(
             window.config.location_history[0],
             {"base_url": "http://new.example", "root_dir": "/visible/root"},
         )
+
+    def test_failed_explicit_root_load_is_not_saved_to_history(self) -> None:
+        window = self.make_window()
+        original_history = list(window.config.location_history)
+        window.base_url_input.setCurrentText("http://unreachable.example")
+        window.on_base_url_edited("http://unreachable.example")
+        window.root_dir_input.setEditText("/new/root")
+
+        window.load_root_directory()
+        window.on_directory_load_cancelled()
+
+        self.assertEqual(window.config.location_history, original_history)
+        self.assertIsNone(window._pending_root_history)
 
     def test_up_from_root_moves_the_root_boundary(self) -> None:
         window = self.make_window()

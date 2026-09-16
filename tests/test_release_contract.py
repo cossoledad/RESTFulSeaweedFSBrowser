@@ -45,8 +45,22 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("tonemapMode: SceneEnvironment.TonemapModeFilmic", qml_source)
         self.assertIn("onWheel: function(wheel)", qml_source)
         self.assertIn("onDoubleClicked: function(mouse)", qml_source)
-        self.assertIn("Quaternion.fromAxesAndAngles", qml_source)
+        self.assertIn("function trackballPoint(x, y)", qml_source)
+        self.assertIn("function applyTrackballRotation(fromPoint, toPoint)", qml_source)
+        self.assertIn("Quaternion.fromAxisAndAngle(axis, -angle)", qml_source)
+        self.assertIn(".times(cameraDelta).normalized()", qml_source)
+        self.assertIn("Quaternion.lookAt", qml_source)
         self.assertIn("inverseRotation(cameraOrigin.rotation)", qml_source)
+        self.assertIn("id: cadModelSpace", qml_source)
+        self.assertIn("eulerRotation.x: -90", qml_source)
+        self.assertIn("function bestFitMagnification()", qml_source)
+        self.assertIn("function resetView()", qml_source)
+        self.assertIn("OrthographicCamera", qml_source)
+        self.assertNotIn("PerspectiveCamera", qml_source)
+        self.assertIn("camera.x -= dx * panScale", qml_source)
+        self.assertNotIn("Math.max(-89", qml_source)
+        self.assertNotIn("cameraOrigin.yaw", qml_source)
+        self.assertNotIn("PERSPECTIVE  ·  SHADED", qml_source)
         self.assertNotIn(
             "eulerRotation: Qt.vector3d(-cameraOrigin.pitch, -cameraOrigin.yaw, 0)",
             qml_source,

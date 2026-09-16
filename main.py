@@ -159,7 +159,7 @@ class ModelPreviewWindow(QMainWindow):
         )
         viewer.rootContext().setContextProperty(
             "modelControlsHint",
-            tr("右键拖动旋转 · 中键拖动平移 · 滚轮缩放 · 右键双击重置视角"),
+            tr("右键自由旋转 · Ctrl+右键或中键平移 · 滚轮缩放 · 右键双击最佳视角"),
         )
         viewer.setSource(
             QUrl.fromLocalFile(get_resource_path("resource/model_preview.qml"))
@@ -266,10 +266,12 @@ class MainWindow(QMainWindow):
         self._preview_load_tasks: Dict[str, str] = {}
         self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
         self._pending_directory_refreshes = set()
+        self._pending_root_history: Optional[tuple[str, str]] = None
         self._pending_upload_retry: Optional[
             tuple[str, str, List[UploadItem]]
         ] = None
         self._directory_load_task_id: Optional[str] = None
+        self._directory_load_context: Optional[tuple[str, str]] = None
         self._directory_save_task_id: Optional[str] = None
         self._create_directory_task_id: Optional[str] = None
         self._create_directory_context: Optional[tuple[str, str]] = None
@@ -563,15 +565,16 @@ class MainWindow(QMainWindow):
     def on_base_url_edited(self, _: str) -> None:
         """Detach an edited address from saved roots until it is explicitly loaded."""
         current_root = self.root_dir_input.currentText() or self.current_dir
-        self.reload_combo_items(
-            self.root_dir_input,
-            [current_root],
-            current_root,
-        )
+        self.root_dir_input.blockSignals(True)
+        self.root_dir_input.clear()
+        self.root_dir_input.setEditText(current_root)
+        self.root_dir_input.blockSignals(False)
+        self._pending_root_history = None
 
-    def remember_location_history(self) -> None:
-        base_url = self.get_base_url()
-        root_dir = self.get_root_dir()
+    def remember_location_history(self, base_url: str, root_dir: str) -> None:
+        """Commit an address/root pair only after that exact directory loaded."""
+        base_url = normalize_base_url(base_url)
+        root_dir = normalize_dir_path(root_dir)
         self.config.location_history = update_location_history(
             self.config.location_history,
             base_url,
@@ -619,8 +622,18 @@ class MainWindow(QMainWindow):
             )
 
     def load_root_directory(self) -> None:
-        self.remember_location_history()
-        self.load_directory(self.get_root_dir(), force_reload=False)
+        base_url = self.get_base_url()
+        root_dir = self.get_root_dir()
+        if not base_url:
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
+            return
+        if self.is_task_active(self._directory_load_task_id):
+            self._status_controller.show_transient(tr("正在加载，请稍候..."))
+            return
+        self._pending_root_history = (base_url, root_dir)
+        # Verify the edited address/root pair instead of trusting an old cache.
+        if not self.load_directory(root_dir, force_reload=True):
+            self._pending_root_history = None
 
     def refresh_current_directory(self) -> None:
         self.load_directory(self.current_dir, force_reload=True)
@@ -646,22 +659,31 @@ class MainWindow(QMainWindow):
     def is_task_active(self, task_id: Optional[str]) -> bool:
         return bool(task_id and self._task_manager.contains(task_id))
 
-    def load_directory(self, dir_path: str, force_reload: bool) -> None:
+    def load_directory(self, dir_path: str, force_reload: bool) -> bool:
         base_url = self.get_base_url()
         if not base_url:
             QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
-            return
+            return False
         if self.is_task_active(self._directory_load_task_id):
             self._status_controller.show_transient(tr("正在加载，请稍候..."))
-            return
+            return False
         self.current_dir = normalize_dir_path(dir_path)
         self.path_label.setText(tr("当前位置: {path}", path=self.current_dir))
-        if not force_reload and self.try_apply_cached_directory(base_url, self.current_dir):
-            return
+        if not force_reload and self.try_apply_cached_directory(
+            base_url,
+            self.current_dir,
+        ):
+            self.commit_pending_root_history(base_url, self.current_dir)
+            return True
         self.start_directory_load(base_url, self.current_dir)
+        return True
 
     def start_directory_load(self, base_url: str, dir_path: str) -> None:
         self.set_loading_ui(True)
+        self._directory_load_context = (
+            normalize_base_url(base_url),
+            normalize_dir_path(dir_path),
+        )
         worker = DirectoryLoadWorker(
             self.client,
             base_url,
@@ -679,20 +701,27 @@ class MainWindow(QMainWindow):
         )
 
     def on_directory_load_finished(self, entries: List[Dict[str, Any]]) -> None:
+        base_url, dir_path = self._directory_load_context or (
+            self.get_base_url(),
+            self.current_dir,
+        )
         self.entries = entries
-        cache_key = self.build_directory_cache_key(self.get_base_url(), self.current_dir)
+        cache_key = self.build_directory_cache_key(base_url, dir_path)
         self._directory_cache.put(cache_key, list(entries))
         self.render_entries()
+        self.commit_pending_root_history(base_url, dir_path)
         self._status_controller.show_transient(
             tr("已加载 {count} 条", count=len(entries))
         )
 
     def on_directory_load_failed(self, error: TaskError) -> None:
+        self.discard_pending_root_history()
         if not self._closing_after_task_cancel:
             QMessageBox.critical(self, tr("加载失败"), error.message)
         self._status_controller.show_transient(tr("加载失败"))
 
     def on_directory_load_cancelled(self) -> None:
+        self.discard_pending_root_history()
         if not self._closing_after_task_cancel:
             self._status_controller.show_transient(tr("目录加载已取消"))
 
@@ -706,6 +735,22 @@ class MainWindow(QMainWindow):
                 0,
                 lambda path=self.current_dir: self.load_directory(path, force_reload=True),
             )
+        self._directory_load_context = None
+
+    def commit_pending_root_history(self, base_url: str, dir_path: str) -> None:
+        loaded_location = (
+            normalize_base_url(base_url),
+            normalize_dir_path(dir_path),
+        )
+        if self._pending_root_history != loaded_location:
+            return
+        self._pending_root_history = None
+        self.remember_location_history(*loaded_location)
+
+    def discard_pending_root_history(self) -> None:
+        context = self._directory_load_context
+        if context is not None and self._pending_root_history == context:
+            self._pending_root_history = None
 
     def set_loading_ui(self, loading: bool) -> None:
         self.base_url_input.setEnabled(not loading)

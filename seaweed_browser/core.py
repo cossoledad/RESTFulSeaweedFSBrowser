@@ -5,15 +5,15 @@ import tempfile
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .i18n import DEFAULT_LANGUAGE, normalize_language, tr
 
 
 APP_NAME = "SeaweedFSBrowser"
-APP_VERSION = "1.0.14"
-DEFAULT_BASE_URL = "http://10.1.23.81:38888"
-DEFAULT_ROOT_DIR = "/buckets/cax-dev/files/"
+APP_VERSION = "1.1.1"
+DEFAULT_BASE_URL = "file:///C:/"
+DEFAULT_ROOT_DIR = "/"
 PAGE_LIMIT = 1000
 PREVIEW_MAX_BYTES = 262144
 GO_MODE_DIR_BIT = 0x80000000
@@ -65,8 +65,7 @@ class AppConfig:
     upload_workers: int = UPLOAD_WORKERS
     max_concurrent_preview_loads: int = MAX_CONCURRENT_PREVIEW_LOADS
     max_concurrent_file_saves: int = MAX_CONCURRENT_FILE_SAVES
-    base_url_history: List[str] = field(default_factory=list)
-    root_dir_history: List[str] = field(default_factory=list)
+    location_history: List[Dict[str, str]] = field(default_factory=list)
     search_history: List[str] = field(default_factory=list)
 
 
@@ -77,13 +76,20 @@ def load_config() -> AppConfig:
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        base_hist_raw = raw.get("base_url_history", [])
-        root_hist_raw = raw.get("root_dir_history", [])
+        location_hist_raw = raw.get("location_history")
         search_hist_raw = raw.get("search_history", [])
+        # The previous schema kept the address and root histories independently.
+        # Those combinations were ambiguous, so deliberately start from the safe
+        # local default instead of attempting to reconstruct them.
+        if not isinstance(location_hist_raw, list):
+            return AppConfig(
+                language=normalize_language(raw.get("language", DEFAULT_LANGUAGE)),
+                search_history=[str(x) for x in search_hist_raw if isinstance(x, str)],
+            )
         return AppConfig(
             language=normalize_language(raw.get("language", DEFAULT_LANGUAGE)),
-            base_url=str(raw.get("base_url", DEFAULT_BASE_URL)),
-            root_dir=str(raw.get("root_dir", DEFAULT_ROOT_DIR)),
+            base_url=normalize_base_url(str(raw.get("base_url", DEFAULT_BASE_URL))),
+            root_dir=normalize_dir_path(str(raw.get("root_dir", DEFAULT_ROOT_DIR))),
             page_limit=sanitize_positive_int(raw.get("page_limit", PAGE_LIMIT), PAGE_LIMIT),
             directory_cache_max_entries=sanitize_bounded_int(
                 raw.get("directory_cache_max_entries", DIRECTORY_CACHE_MAX_ENTRIES),
@@ -113,8 +119,7 @@ def load_config() -> AppConfig:
                 MAX_CONCURRENT_FILE_SAVES,
                 CONCURRENT_TASK_LIMIT,
             ),
-            base_url_history=[str(x) for x in base_hist_raw if isinstance(x, str)],
-            root_dir_history=[str(x) for x in root_hist_raw if isinstance(x, str)],
+            location_history=normalize_location_history(location_hist_raw),
             search_history=[str(x) for x in search_hist_raw if isinstance(x, str)],
         )
     except Exception:
@@ -153,8 +158,7 @@ def save_config(cfg: AppConfig) -> None:
             MAX_CONCURRENT_FILE_SAVES,
             CONCURRENT_TASK_LIMIT,
         ),
-        "base_url_history": cfg.base_url_history[:MAX_HISTORY],
-        "root_dir_history": cfg.root_dir_history[:MAX_HISTORY],
+        "location_history": normalize_location_history(cfg.location_history),
         "search_history": cfg.search_history[:MAX_HISTORY],
     }
     parent = os.path.dirname(path)
@@ -178,6 +182,43 @@ def update_history(history: List[str], value: str) -> List[str]:
     if not stripped:
         return history[:MAX_HISTORY]
     return ([stripped] + [item for item in history if item != stripped])[:MAX_HISTORY]
+
+
+def normalize_location_history(value: Any) -> List[Dict[str, str]]:
+    """Return valid, de-duplicated address/root pairs from the current schema."""
+    if not isinstance(value, list):
+        return []
+    result: List[Dict[str, str]] = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        base_url = normalize_base_url(str(item.get("base_url", "")))
+        root_dir = normalize_dir_path(str(item.get("root_dir", "")))
+        if not base_url or (base_url, root_dir) in seen:
+            continue
+        seen.add((base_url, root_dir))
+        result.append({"base_url": base_url, "root_dir": root_dir})
+        if len(result) >= MAX_HISTORY:
+            break
+    return result
+
+
+def update_location_history(
+    history: List[Dict[str, str]], base_url: str, root_dir: str
+) -> List[Dict[str, str]]:
+    entry = {
+        "base_url": normalize_base_url(base_url),
+        "root_dir": normalize_dir_path(root_dir),
+    }
+    if not entry["base_url"]:
+        return normalize_location_history(history)
+    return [entry] + [
+        item
+        for item in normalize_location_history(history)
+        if (item["base_url"], item["root_dir"])
+        != (entry["base_url"], entry["root_dir"])
+    ][: MAX_HISTORY - 1]
 
 
 def normalize_base_url(base_url: str) -> str:

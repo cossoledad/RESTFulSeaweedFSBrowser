@@ -1,10 +1,13 @@
 import os
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from seaweed_browser.core import (
     AppConfig,
+    DEFAULT_BASE_URL,
+    DEFAULT_ROOT_DIR,
     get_config_path,
     join_url,
     join_remote_child,
@@ -13,6 +16,7 @@ from seaweed_browser.core import (
     safe_local_path,
     sanitize_bounded_int,
     save_config,
+    update_location_history,
     validate_remote_child_name,
 )
 
@@ -99,7 +103,9 @@ class CoreTests(unittest.TestCase):
                     upload_workers=5,
                     max_concurrent_preview_loads=2,
                     max_concurrent_file_saves=1,
-                    base_url_history=["http://localhost:8888"],
+                    location_history=[
+                        {"base_url": "http://localhost:8888", "root_dir": "/buckets/test/"}
+                    ],
                 )
                 save_config(config)
                 self.assertTrue(os.path.exists(get_config_path()))
@@ -113,6 +119,39 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(loaded.upload_workers, 5)
                 self.assertEqual(loaded.max_concurrent_preview_loads, 2)
                 self.assertEqual(loaded.max_concurrent_file_saves, 1)
+                self.assertEqual(loaded.location_history, config.location_history)
+
+    def test_old_independent_histories_are_discarded_for_local_default(self) -> None:
+        with tempfile.TemporaryDirectory() as appdata:
+            with patch.dict(os.environ, {"APPDATA": appdata}):
+                path = get_config_path()
+                with open(path, "w", encoding="utf-8") as file:
+                    json.dump(
+                        {
+                            "base_url": "http://legacy.example",
+                            "root_dir": "/legacy/",
+                            "base_url_history": ["http://legacy.example"],
+                            "root_dir_history": ["/legacy/"],
+                        },
+                        file,
+                    )
+                loaded = load_config()
+                self.assertEqual(loaded.base_url, DEFAULT_BASE_URL)
+                self.assertEqual(loaded.root_dir, DEFAULT_ROOT_DIR)
+                self.assertEqual(loaded.location_history, [])
+
+    def test_location_history_keeps_address_and_root_as_one_pair(self) -> None:
+        history = update_location_history([], "http://one.example/", "/one/")
+        history = update_location_history(history, "http://two.example", "/two/")
+        history = update_location_history(history, "http://one.example", "/other/")
+        self.assertEqual(
+            history,
+            [
+                {"base_url": "http://one.example", "root_dir": "/other/"},
+                {"base_url": "http://two.example", "root_dir": "/two/"},
+                {"base_url": "http://one.example", "root_dir": "/one/"},
+            ],
+        )
 
 
 if __name__ == "__main__":

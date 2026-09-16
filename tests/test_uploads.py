@@ -92,6 +92,34 @@ class ConcurrentUploadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build_upload_items([first, second], "/target", join_remote_child)
 
+    def test_build_items_expands_folder_and_preserves_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "project")
+            nested = os.path.join(folder, "assets")
+            os.makedirs(nested)
+            first = os.path.join(folder, "readme.txt")
+            second = os.path.join(nested, "image.bin")
+            with open(first, "wb") as file:
+                file.write(b"readme")
+            with open(second, "wb") as file:
+                file.write(b"image")
+
+            items = build_upload_items([folder], "/target", join_remote_child)
+
+        self.assertEqual(
+            [item.remote_path for item in items],
+            ["/target/project/readme.txt", "/target/project/assets/image.bin"],
+        )
+        self.assertTrue(all(item.from_directory for item in items))
+        self.assertEqual({item.top_level_name for item in items}, {"project"})
+
+    def test_build_items_rejects_empty_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "empty")
+            os.makedirs(folder)
+            with self.assertRaises(ValueError):
+                build_upload_items([folder], "/target", join_remote_child)
+
     def test_rejects_non_positive_worker_count(self) -> None:
         item = UploadItem("local", "/remote", 0)
         with self.assertRaises(ValueError):

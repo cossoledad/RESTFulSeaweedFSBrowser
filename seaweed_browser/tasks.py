@@ -181,6 +181,9 @@ class UploadBatchWorker(CancellableWorker):
                     {
                         "local_path": failure.item.local_path,
                         "remote_path": failure.item.remote_path,
+                        "size": failure.item.size,
+                        "top_level_name": failure.item.top_level_name,
+                        "from_directory": failure.item.from_directory,
                         "error": failure.error,
                     }
                     for failure in result.failures

@@ -264,7 +264,9 @@ class MainWindow(QMainWindow):
         self._preview_load_tasks: Dict[str, str] = {}
         self._model_preview_processes: Dict[str, ModelPreviewProcess] = {}
         self._pending_directory_refreshes = set()
-        self._pending_upload_retry: Optional[tuple[str, str, List[str]]] = None
+        self._pending_upload_retry: Optional[
+            tuple[str, str, List[UploadItem]]
+        ] = None
         self._directory_load_task_id: Optional[str] = None
         self._directory_save_task_id: Optional[str] = None
         self._create_directory_task_id: Optional[str] = None
@@ -360,7 +362,11 @@ class MainWindow(QMainWindow):
         self.refresh_btn = QPushButton(tr("刷新当前目录 (F5)"))
         self.save_dir_btn = QPushButton(tr("保存到本地"))
         self.create_dir_btn = QPushButton(tr("新建文件夹"))
-        self.upload_files_btn = QPushButton(tr("上传文件"))
+        self.upload_files_btn = QPushButton(tr("上传"))
+        self.upload_menu = QMenu(self.upload_files_btn)
+        self.upload_files_action = self.upload_menu.addAction(tr("上传文件"))
+        self.upload_folder_action = self.upload_menu.addAction(tr("上传文件夹"))
+        self.upload_files_btn.setMenu(self.upload_menu)
         browser_toolbar.addWidget(self.up_btn)
         browser_toolbar.addWidget(self.refresh_btn)
         browser_toolbar.addWidget(self.save_dir_btn)
@@ -412,7 +418,8 @@ class MainWindow(QMainWindow):
         self.up_btn.clicked.connect(self.go_up_directory)
         self.save_dir_btn.clicked.connect(self.save_current_directory_to_local)
         self.create_dir_btn.clicked.connect(self.create_remote_directory)
-        self.upload_files_btn.clicked.connect(self.select_files_to_upload)
+        self.upload_files_action.triggered.connect(self.select_files_to_upload)
+        self.upload_folder_action.triggered.connect(self.select_folder_to_upload)
         self.open_config_btn.clicked.connect(self.open_config_directory)
         self.base_url_input.activated.connect(self.on_base_url_selected)
         self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -478,7 +485,9 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setText(tr("刷新当前目录 (F5)"))
         self.save_dir_btn.setText(tr("保存到本地"))
         self.create_dir_btn.setText(tr("新建文件夹"))
-        self.upload_files_btn.setText(tr("上传文件"))
+        self.upload_files_btn.setText(tr("上传"))
+        self.upload_files_action.setText(tr("上传文件"))
+        self.upload_folder_action.setText(tr("上传文件夹"))
         self.tree.setHeaderLabels(
             [
                 tr("名称"),
@@ -771,7 +780,8 @@ class MainWindow(QMainWindow):
         item = self.tree.itemAt(pos)
         menu = QMenu(self)
         create_action = menu.addAction(tr("新建文件夹"))
-        upload_action = menu.addAction(tr("上传文件"))
+        upload_files_action = menu.addAction(tr("上传文件"))
+        upload_folder_action = menu.addAction(tr("上传文件夹"))
         details_action = None
         if item is not None:
             menu.addSeparator()
@@ -779,8 +789,10 @@ class MainWindow(QMainWindow):
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action == create_action:
             self.create_remote_directory()
-        elif action == upload_action:
+        elif action == upload_files_action:
             self.select_files_to_upload()
+        elif action == upload_folder_action:
+            self.select_folder_to_upload()
         elif details_action is not None and action == details_action:
             self.open_entry_details(item)
 
@@ -897,33 +909,51 @@ class MainWindow(QMainWindow):
             self._status_controller.show_transient(tr("目录创建失败"))
 
     def select_files_to_upload(self) -> None:
-        if self.is_task_active(self._upload_task_id):
-            QMessageBox.information(
-                self,
-                tr("上传进行中"),
-                tr("已有上传批次正在执行，请等待完成或先取消。"),
-            )
+        upload_context = self.get_upload_context()
+        if upload_context is None:
             return
-        base_url = self.get_base_url()
-        if not base_url:
-            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
-            return
-        if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
-            QMessageBox.warning(
-                self,
-                tr("路径错误"),
-                tr("当前目录超出配置的根目录，拒绝写入。"),
-            )
-            return
+        base_url, target_dir = upload_context
         local_paths, _ = QFileDialog.getOpenFileNames(
             self,
             tr("选择要上传的文件"),
             "",
             tr("所有文件 (*)"),
         )
-        if not local_paths:
+        if local_paths:
+            self.prepare_upload_batch(local_paths, base_url, target_dir)
+
+    def select_folder_to_upload(self) -> None:
+        upload_context = self.get_upload_context()
+        if upload_context is None:
             return
-        self.prepare_upload_batch(local_paths, base_url, self.current_dir)
+        base_url, target_dir = upload_context
+        local_path = QFileDialog.getExistingDirectory(
+            self,
+            tr("选择要上传的文件夹"),
+        )
+        if local_path:
+            self.prepare_upload_batch([local_path], base_url, target_dir)
+
+    def get_upload_context(self) -> Optional[tuple[str, str]]:
+        if self.is_task_active(self._upload_task_id):
+            QMessageBox.information(
+                self,
+                tr("上传进行中"),
+                tr("已有上传批次正在执行，请等待完成或先取消。"),
+            )
+            return None
+        base_url = self.get_base_url()
+        if not base_url:
+            QMessageBox.warning(self, tr("参数错误"), tr("地址不能为空"))
+            return None
+        if not remote_path_is_within_root(self.current_dir, self.get_root_dir()):
+            QMessageBox.warning(
+                self,
+                tr("路径错误"),
+                tr("当前目录超出配置的根目录，拒绝写入。"),
+            )
+            return None
+        return base_url, self.current_dir
 
     def prepare_upload_batch(
         self,
@@ -939,14 +969,17 @@ class MainWindow(QMainWindow):
             return
 
         existing = self.existing_entries_by_name()
-        blocked_names = [
-            basename(item.remote_path)
-            for item in items
-            if (
-                basename(item.remote_path) in existing
-                and is_directory(existing[basename(item.remote_path)])
-            )
-        ]
+        blocked_names = sorted(
+            {
+                item.top_level_name
+                for item in items
+                if item.top_level_name in existing
+                and (
+                    (item.from_directory and not is_directory(existing[item.top_level_name]))
+                    or (not item.from_directory and is_directory(existing[item.top_level_name]))
+                )
+            }
+        )
         if blocked_names:
             shown = "\n".join(blocked_names[:10])
             if len(blocked_names) > 10:
@@ -958,20 +991,40 @@ class MainWindow(QMainWindow):
                 self,
                 tr("存在目录冲突"),
                 tr(
-                    "以下名称已经是远程文件夹，不能作为文件覆盖:\n{names}",
+                    "以下名称的文件/文件夹类型与远程项目冲突，无法覆盖:\n{names}",
                     names=shown,
                 ),
             )
             blocked = set(blocked_names)
-            items = [item for item in items if basename(item.remote_path) not in blocked]
+            items = [item for item in items if item.top_level_name not in blocked]
         if not items:
             return
+
+        merged_folders = {
+            item.top_level_name
+            for item in items
+            if item.from_directory
+            and item.top_level_name in existing
+            and is_directory(existing[item.top_level_name])
+        }
+        if confirm_overwrite and merged_folders:
+            should_merge = ask_yes_no(
+                self,
+                tr("确认合并文件夹"),
+                tr(
+                    "远程已存在同名文件夹，其中的同名文件将被覆盖。\n本次共上传 {total} 个文件，是否继续？",
+                    total=len(items),
+                ),
+            )
+            if not should_merge:
+                return
 
         overwrite_count = sum(
             1
             for item in items
-            if basename(item.remote_path) in existing
-            and not is_directory(existing[basename(item.remote_path)])
+            if not item.from_directory
+            and item.top_level_name in existing
+            and not is_directory(existing[item.top_level_name])
         )
         if confirm_overwrite and overwrite_count:
             should_overwrite = ask_yes_no(
@@ -1054,12 +1107,20 @@ class MainWindow(QMainWindow):
             ),
         )
         if should_retry:
-            retry_paths = [
-                str(failure.get("local_path", ""))
+            retry_items = [
+                UploadItem(
+                    local_path=str(failure.get("local_path", "")),
+                    remote_path=str(failure.get("remote_path", "")),
+                    size=int(failure.get("size", 0)),
+                    top_level_name=str(failure.get("top_level_name", "")),
+                    from_directory=bool(failure.get("from_directory", False)),
+                )
                 for failure in failures
-                if isinstance(failure, dict) and failure.get("local_path")
+                if isinstance(failure, dict)
+                and failure.get("local_path")
+                and failure.get("remote_path")
             ]
-            self._pending_upload_retry = (base_url, target_dir, retry_paths)
+            self._pending_upload_retry = (base_url, target_dir, retry_items)
 
     def on_upload_cancelled(self, base_url: str, target_dir: str) -> None:
         self.invalidate_remote_directory(base_url, target_dir)
@@ -1471,12 +1532,7 @@ class MainWindow(QMainWindow):
         self._pending_upload_retry = None
         if retry is None or self._closing_after_task_cancel:
             return
-        base_url, target_dir, local_paths = retry
-        try:
-            items = build_upload_items(local_paths, target_dir, join_remote_child)
-        except (OSError, ValueError) as error:
-            QMessageBox.warning(self, tr("无法重试上传"), str(error))
-            return
+        base_url, target_dir, items = retry
         if items:
             QTimer.singleShot(
                 0,

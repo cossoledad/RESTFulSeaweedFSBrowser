@@ -17,6 +17,8 @@ class UploadItem:
     local_path: str
     remote_path: str
     size: int
+    top_level_name: str = ""
+    from_directory: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,9 +45,48 @@ def build_upload_items(
     seen_targets = set()
     for local_path in local_paths:
         absolute_path = os.path.abspath(local_path)
+        if os.path.isdir(absolute_path):
+            root_name = os.path.basename(os.path.normpath(absolute_path))
+            candidates = []
+            for current_root, directory_names, file_names in os.walk(
+                absolute_path,
+                followlinks=False,
+            ):
+                directory_names[:] = sorted(
+                    name
+                    for name in directory_names
+                    if not os.path.islink(os.path.join(current_root, name))
+                )
+                for file_name in sorted(file_names):
+                    candidate = os.path.join(current_root, file_name)
+                    if os.path.isfile(candidate) and not os.path.islink(candidate):
+                        candidates.append(candidate)
+            if not candidates:
+                raise ValueError(tr("文件夹中没有可上传的文件: {path}", path=local_path))
+            for candidate in candidates:
+                relative_path = os.path.relpath(candidate, absolute_path)
+                remote_path = remote_directory
+                for component in (root_name, *relative_path.split(os.sep)):
+                    remote_path = join_child(remote_path, component)
+                if remote_path in seen_targets:
+                    raise ValueError(
+                        tr("上传列表包含重复目标路径: {path}", path=remote_path)
+                    )
+                seen_targets.add(remote_path)
+                items.append(
+                    UploadItem(
+                        local_path=candidate,
+                        remote_path=remote_path,
+                        size=os.path.getsize(candidate),
+                        top_level_name=root_name,
+                        from_directory=True,
+                    )
+                )
+            continue
         if not os.path.isfile(absolute_path):
             raise ValueError(tr("不是普通文件: {path}", path=local_path))
-        remote_path = join_child(remote_directory, os.path.basename(absolute_path))
+        file_name = os.path.basename(absolute_path)
+        remote_path = join_child(remote_directory, file_name)
         if remote_path in seen_targets:
             raise ValueError(
                 tr(
@@ -59,6 +100,7 @@ def build_upload_items(
                 local_path=absolute_path,
                 remote_path=remote_path,
                 size=os.path.getsize(absolute_path),
+                top_level_name=file_name,
             )
         )
     return items
